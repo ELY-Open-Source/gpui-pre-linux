@@ -291,7 +291,7 @@ fn a_focus_lost_leaves_no_key_down() {
 
 #[test]
 fn a_lock_replays_under_the_locks_it_went_down_under() {
-    // Caps, then both Shifts, which lock Caps here; two let go.
+    // Caps, then both Shifts, which lock Caps; two released.
     let (mut held, mut state) = (HeldKeys::default(), layouts("us", "shift:both_capslock"));
     let mut compositor = Compositor::new(layouts("us", "shift:both_capslock"));
     for (keycode, pressed) in [
@@ -321,7 +321,7 @@ fn keys_held_on_entering_keep_the_first_mask_s_group() {
 
 #[test]
 fn a_new_keymap_s_mask_names_the_held_keys_group() {
-    // Right Alt held in German; the keymap becomes us,de, group 1.
+    // Right Alt held in German; keymap becomes us,de, group 1.
     let (mut held, mut state) = (HeldKeys::default(), layouts("de", "lv3:lwin_switch"));
     sent(&mut held, &mut state, 0, 0);
     key(&mut held, &mut state, RALT, true);
@@ -351,7 +351,7 @@ impl Compositor {
         Self { state, sent: None }
     }
 
-    /// One key through the compositor and the client, mask and all.
+    /// One key through the compositor and client, mask and all.
     fn play(&mut self, held: &mut HeldKeys, state: &mut State, keycode: u32, pressed: bool) {
         self.state
             .update_key(Keycode::from(keycode), direction(pressed));
