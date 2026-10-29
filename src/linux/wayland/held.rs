@@ -13,8 +13,8 @@ struct Down {
 #[derive(Default)]
 pub(super) struct HeldKeys {
     down: Vec<Down>,
-    /// The mask's modifiers, held while an unseen key is down.
-    pinned: u32,
+    /// What unseen keys hold, by the first mask after them.
+    pinned: Option<u32>,
 }
 
 impl HeldKeys {
@@ -32,7 +32,14 @@ impl HeldKeys {
         }
         // The mask wins; each key keeps what its release clears.
         state.update_mask(depressed, latched, locked, 0, 0, group);
-        self.pinned = if self.unseen_down() { depressed } else { 0 };
+        // Later masks may only show unseen keys letting go.
+        self.pinned = self
+            .pinned
+            .map(|pinned| pinned & depressed)
+            .or(Some(depressed));
+        if !self.unseen_down() {
+            self.pinned = None;
+        }
     }
 
     /// Moves the state through a key, as xkb does.
@@ -60,13 +67,14 @@ impl HeldKeys {
             state.update_key(keycode, xkb::KeyDirection::Up);
         }
         if !self.unseen_down() {
-            self.pinned = 0;
+            self.pinned = None;
         }
         // Unseen keys still hold what the mask said they did.
+        let pinned = self.pinned.unwrap_or(0);
         let depressed = state.serialize_mods(xkb::STATE_MODS_DEPRESSED);
-        if self.pinned & !depressed != 0 {
+        if pinned & !depressed != 0 {
             state.update_mask(
-                depressed | self.pinned,
+                depressed | pinned,
                 state.serialize_mods(xkb::STATE_MODS_LATCHED),
                 state.serialize_mods(xkb::STATE_MODS_LOCKED),
                 state.serialize_layout(xkb::STATE_LAYOUT_DEPRESSED),
@@ -78,6 +86,7 @@ impl HeldKeys {
 
     /// Keys down before focus, which the mask alone speaks for.
     pub fn unseen(&mut self, down: Vec<Keycode>) {
+        self.pinned = None;
         self.down = down
             .into_iter()
             .map(|keycode| Down {
@@ -89,6 +98,7 @@ impl HeldKeys {
 
     /// A new keymap: its state saw no key down.
     pub fn rekeyed(&mut self) {
+        self.pinned = None;
         for down in &mut self.down {
             down.under = None;
         }
@@ -97,7 +107,7 @@ impl HeldKeys {
     /// Focus lost: no key is down here.
     pub fn clear(&mut self) {
         self.down.clear();
-        self.pinned = 0;
+        self.pinned = None;
     }
 
     fn unseen_down(&self) -> bool {

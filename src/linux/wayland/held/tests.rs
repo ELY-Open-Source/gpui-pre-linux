@@ -389,8 +389,9 @@ impl Compositor {
 }
 
 /// Each keymap the fuzzing plays, with options that trip readings.
-const KEYMAPS: [(&str, &str); 13] = [
+const KEYMAPS: [(&str, &str); 14] = [
     ("us", ""),
+    ("de", "lv3:lalt_switch,lv3:caps_switch_latch"),
     ("us", "shift:breaks_caps"),
     ("us", "caps:shiftlock"),
     ("us", "shift:both_capslock_cancel"),
@@ -522,4 +523,28 @@ fn an_unseen_lock_is_the_mask_s() {
     );
     compositor.play(&mut held, &mut state, SHIFT_R, false);
     assert_eq!(compositor.differs(&state), None);
+}
+
+#[test]
+fn a_plain_key_held_unseen_pins_no_later_modifier() {
+    // A held into the window; AltGr keys and a latch follow.
+    let options = "lv3:lalt_switch,lv3:caps_switch_latch";
+    let (mut held, mut state) = (HeldKeys::default(), layouts("de", options));
+    let mut compositor = Compositor::new(layouts("de", options));
+    focus(&mut compositor, &mut held, &mut state, &[A]);
+    for (keycode, pressed) in [
+        (RALT, true),
+        (CAPS, true),
+        (SHIFT_R, true),
+        (SHIFT_R, false),
+        (CAPS, false),
+        (CAPS, true),
+        (A, false),
+        (LALT, true),
+        (LALT, false),
+        (RALT, false),
+    ] {
+        compositor.play(&mut held, &mut state, keycode, pressed);
+        assert_eq!(compositor.differs(&state), None);
+    }
 }
