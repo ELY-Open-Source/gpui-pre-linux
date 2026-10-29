@@ -1,6 +1,6 @@
 //! Modifier keys a forwarder sends without `wl_keyboard.modifiers`.
 
-use xkbcommon::xkb::{self, Keycode, Keysym, State};
+use xkbcommon::xkb::{self, Keycode, State};
 
 /// The compositor's last mask, and the modifier keys heard since.
 #[derive(Default)]
@@ -18,7 +18,7 @@ impl HeldMods {
     pub fn sent(&mut self, depressed: u32, latched: u32, locked: u32, group: u32) {
         (self.depressed, self.latched, self.locked, self.group) =
             (depressed, latched, locked, group);
-        self.held.retain(|(_, bit)| depressed & bit != 0);
+        self.held.retain(|(_, bits)| depressed & bits == *bits);
         self.touched = 0;
     }
 
@@ -31,9 +31,20 @@ impl HeldMods {
         self.touched |= bit;
     }
 
-    /// Forgets everything, as a new keymap or a focus lost starts afresh.
+    /// Forgets everything, as a focus lost starts afresh.
     pub fn clear(&mut self) {
         *self = Self::default();
+    }
+
+    /// A new keymap: a fresh state, held keys reread.
+    pub fn rekeyed(&mut self, keymap: &xkb::Keymap) {
+        let held = std::mem::take(&mut self.held);
+        self.clear();
+        self.held = held
+            .into_iter()
+            .map(|(keycode, _)| (keycode, bits(keymap, keycode)))
+            .filter(|(_, bits)| *bits != 0)
+            .collect();
     }
 
     /// Focus gained with these modifier keys already down.
@@ -48,7 +59,7 @@ impl HeldMods {
         (self.depressed & !self.touched) | (held & self.touched)
     }
 
-    /// Sets the state to the mask and the keys heard since.
+    /// Sets the state to the mask and keys since.
     pub fn apply(&self, state: &mut State) {
         state.update_mask(
             self.depressed(),
@@ -61,19 +72,12 @@ impl HeldMods {
     }
 }
 
-/// The modifier a key holds down, as a bit of the keymap's mask.
-pub(super) fn bit(state: &State, keysym: Keysym) -> u32 {
-    let name = match keysym {
-        Keysym::Shift_L | Keysym::Shift_R => xkb::MOD_NAME_SHIFT,
-        Keysym::Control_L | Keysym::Control_R => xkb::MOD_NAME_CTRL,
-        Keysym::Alt_L | Keysym::Alt_R | Keysym::Meta_L | Keysym::Meta_R => xkb::MOD_NAME_ALT,
-        Keysym::Super_L | Keysym::Super_R => xkb::MOD_NAME_LOGO,
-        _ => return 0,
-    };
-    match state.get_keymap().mod_get_index(name) {
-        xkb::MOD_INVALID => 0,
-        index => 1 << index,
-    }
+/// The modifiers a key holds, as the keymap sets them.
+pub(super) fn bits(keymap: &xkb::Keymap, keycode: Keycode) -> u32 {
+    let mut state = State::new(keymap);
+    state.update_key(keycode, xkb::KeyDirection::Down);
+    // A lock key toggles what it locks, holding nothing.
+    state.serialize_mods(xkb::STATE_MODS_DEPRESSED) & !state.serialize_mods(xkb::STATE_MODS_LOCKED)
 }
 
 #[cfg(test)]
@@ -87,17 +91,24 @@ mod tests {
     const A: u32 = 30 + 8;
     const C: u32 = 46 + 8;
 
-    fn us() -> State {
+    const LWIN: u32 = 125 + 8;
+    const RWIN: u32 = 126 + 8;
+
+    fn keymap(options: &str) -> xkb::Keymap {
         let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
-        let keymap = xkb::Keymap::new_from_names(&context, "", "", "us", "", None, 0)
-            .expect("the us keymap compiles");
-        State::new(&keymap)
+        let options = Some(options.to_string()).filter(|options| !options.is_empty());
+        xkb::Keymap::new_from_names(&context, "", "", "us", "", options, 0)
+            .expect("the us keymap compiles")
+    }
+
+    fn us() -> State {
+        State::new(&keymap(""))
     }
 
     /// Plays a modifier key as the Wayland client hears it.
     fn key(held: &mut HeldMods, state: &mut State, keycode: u32, pressed: bool) {
         let keycode = Keycode::from(keycode);
-        let bit = bit(state, state.key_get_one_sym(keycode));
+        let bit = bits(&state.get_keymap(), keycode);
         assert_ne!(bit, 0, "keycode {keycode:?} holds a modifier");
         held.key(keycode, bit, pressed);
         held.apply(state);
@@ -108,7 +119,7 @@ mod tests {
             .iter()
             .map(|keycode| {
                 let keycode = Keycode::from(*keycode);
-                (keycode, bit(state, state.key_get_one_sym(keycode)))
+                (keycode, bits(&state.get_keymap(), keycode))
             })
             .collect();
         held.entered(keys);
@@ -156,7 +167,7 @@ mod tests {
 
     #[test]
     fn the_mask_outweighs_a_release_never_heard() {
-        // An input method swallows Shift_L's release; the next mask has none.
+        // Shift_L's release swallowed; the next mask lacks Shift.
         let (mut held, mut state) = (HeldMods::default(), us());
         key(&mut held, &mut state, SHIFT_L, true);
         sent(&mut held, &mut state, 4);
@@ -188,13 +199,17 @@ mod tests {
         key(&mut held, &mut state, SHIFT_L, false);
         sent(&mut held, &mut state, 0);
         assert!(!modifiers_from_xkb(&state).shift);
-        assert_eq!(bit(&state, Keysym::a), 0);
-        assert_eq!(bit(&state, Keysym::Caps_Lock), 0);
+        assert_eq!(bits(&state.get_keymap(), Keycode::from(A)), 0);
+        assert_eq!(
+            bits(&state.get_keymap(), Keycode::from(58u32 + 8)),
+            0,
+            "Caps Lock locks"
+        );
     }
 
     #[test]
     fn a_mask_drops_the_keys_it_leaves_out() {
-        // Left Shift's release swallowed, a mask without Shift, then Right Shift.
+        // Left Shift's release swallowed, a mask without Shift, Right Shift.
         let (mut held, mut state) = (HeldMods::default(), us());
         key(&mut held, &mut state, SHIFT_L, true);
         sent(&mut held, &mut state, 0);
@@ -205,11 +220,40 @@ mod tests {
 
     #[test]
     fn keys_held_on_entering_stay_held() {
-        // Both Shifts held into the window; the mask holds as one goes up.
+        // Both Shifts held on entering; one goes up, mask unchanged.
         let (mut held, mut state) = (HeldMods::default(), us());
         entered(&mut held, &mut state, &[SHIFT_L, SHIFT_R]);
         sent(&mut held, &mut state, 1);
         key(&mut held, &mut state, SHIFT_L, false);
         assert_eq!(state.key_get_utf8(Keycode::from(A)), "A");
+    }
+
+    #[test]
+    fn a_new_keymap_keeps_the_keys_held() {
+        // Both Shifts held as the keymap changes; one goes up.
+        let (mut held, mut state) = (HeldMods::default(), us());
+        sent(&mut held, &mut state, 0);
+        key(&mut held, &mut state, SHIFT_L, true);
+        key(&mut held, &mut state, SHIFT_R, true);
+        let next = keymap("");
+        state = State::new(&next);
+        held.rekeyed(&next);
+        sent(&mut held, &mut state, 1);
+        key(&mut held, &mut state, SHIFT_L, false);
+        assert_eq!(state.key_get_utf8(Keycode::from(A)), "A");
+    }
+
+    #[test]
+    fn a_key_holds_what_the_keymap_maps_it_to() {
+        // altwin:meta_win puts Meta on the Windows keys, as Mod4.
+        let (mut held, mut state) = (HeldMods::default(), State::new(&keymap("altwin:meta_win")));
+        key(&mut held, &mut state, LWIN, true);
+        let platform = modifiers_from_xkb(&state);
+        let mask = held.depressed();
+        sent(&mut held, &mut state, mask);
+        key(&mut held, &mut state, RWIN, true);
+        let modifiers = modifiers_from_xkb(&state);
+        assert!(!modifiers.alt && modifiers.platform, "{modifiers:?}");
+        assert_eq!(modifiers, platform);
     }
 }

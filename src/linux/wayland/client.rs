@@ -2002,7 +2002,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                     .expect("Failed to create keymap")
                 };
                 state.keymap_state = Some(xkb::State::new(&keymap));
-                state.held.clear();
+                state.held.rekeyed(&keymap);
                 state.compose_state = get_xkb_compose_state(&xkb_context);
                 drop(state);
 
@@ -2017,10 +2017,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                         .map(|key| {
                             let key = u32::from_ne_bytes(key.try_into().expect("four bytes"));
                             let keycode = Keycode::from(key + MIN_KEYCODE);
-                            (
-                                keycode,
-                                held::bit(keymap_state, keymap_state.key_get_one_sym(keycode)),
-                            )
+                            (keycode, held::bits(&keymap_state.get_keymap(), keycode))
                         })
                         .collect(),
                     None => Vec::new(),
@@ -2106,7 +2103,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                 let keysym = keymap_state.key_get_one_sym(keycode);
 
                 // A forwarder may send a modifier's key without its mask.
-                let bit = held::bit(keymap_state, keysym);
+                let bit = held::bits(&keymap_state.get_keymap(), keycode);
                 if bit != 0 {
                     let state_ref = &mut *state;
                     let keymap_state = state_ref.keymap_state.as_mut().unwrap();
