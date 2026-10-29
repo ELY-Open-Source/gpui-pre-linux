@@ -219,6 +219,9 @@ struct Sending {
 /// A transfer whose requestor takes nothing this long is dropped.
 const STALLED: Duration = Duration::from_secs(30);
 
+/// How long a wait on the socket lasts before the queue is read again.
+const QUEUE_CHECK: Duration = Duration::from_millis(50);
+
 /// Transfers under way, by the requestor's window and property.
 type Transfers = HashMap<(Window, Atom), Sending>;
 
@@ -751,7 +754,8 @@ impl Inner {
                 events: libc::POLLIN,
                 revents: 0,
             };
-            let wait = i32::try_from(left.as_millis() + 1).unwrap_or(i32::MAX);
+            // Another thread may queue our events, so look again soon.
+            let wait = left.min(QUEUE_CHECK).as_millis() as i32 + 1;
             // SAFETY: one pollfd for the connection's live socket.
             unsafe { libc::poll(&mut poll, 1, wait) };
         }
