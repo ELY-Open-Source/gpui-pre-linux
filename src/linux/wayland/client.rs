@@ -2029,7 +2029,10 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                 let keyboard_focused_window = get_window(&mut state, &surface.id());
                 state.keyboard_focused_window = None;
                 state.enter_token.take();
-                state.held.clear();
+                let state_ref = &mut *state;
+                if let Some(keymap_state) = state_ref.keymap_state.as_mut() {
+                    state_ref.held.left(keymap_state);
+                }
                 // Prevent keyboard events from repeating after opening e.g. a file chooser and closing it quickly
                 state.repeat.current_id += 1;
                 state.restore_cursor_after_hide();

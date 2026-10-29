@@ -7,6 +7,8 @@ struct Down {
     keycode: Keycode,
     /// Depressed, latched, locked, group; `None` if down unseen.
     under: Option<[u32; 4]>,
+    /// The modifiers its release would clear.
+    own: u32,
 }
 
 /// The keys down, oldest first.
@@ -21,12 +23,18 @@ impl HeldKeys {
     /// The compositor's mask; a state that disagrees is rebuilt.
     pub fn sent(&mut self, state: &mut State, mask: [u32; 4]) {
         let [depressed, latched, locked, group] = mask;
-        // Only held keys' counts need a fresh state.
-        if state.serialize_mods(xkb::STATE_MODS_DEPRESSED) != depressed {
+        let seen = self.down.iter().fold(0, |seen, down| seen | down.own);
+        // A seen key's modifier the mask lacks: a lost release.
+        if state.serialize_mods(xkb::STATE_MODS_DEPRESSED) & !depressed & seen != 0 {
             *state = State::new(&state.get_keymap());
-            // Seen keys again, under the state each press found.
+            // Seen keys again, each under the state its press found.
             self.down.retain(|down| match down.under {
-                Some(under) => press(state, down.keycode, under, depressed),
+                _ if down.own & !depressed != 0 => false,
+                Some([depressed, latched, locked, group]) => {
+                    state.update_mask(depressed, latched, locked, 0, 0, group);
+                    state.update_key(down.keycode, xkb::KeyDirection::Down);
+                    true
+                }
                 None => true,
             });
         }
@@ -62,6 +70,7 @@ impl HeldKeys {
             self.down.push(Down {
                 keycode,
                 under: Some(under),
+                own: own(state, keycode, under),
             });
         } else {
             state.update_key(keycode, xkb::KeyDirection::Up);
@@ -92,6 +101,7 @@ impl HeldKeys {
             .map(|keycode| Down {
                 keycode,
                 under: None,
+                own: 0,
             })
             .collect();
     }
@@ -101,13 +111,15 @@ impl HeldKeys {
         self.pinned = None;
         for down in &mut self.down {
             down.under = None;
+            down.own = 0;
         }
     }
 
-    /// Focus lost: no key is down here.
-    pub fn clear(&mut self) {
+    /// Focus lost: no key down here, nor in the state.
+    pub fn left(&mut self, state: &mut State) {
         self.down.clear();
         self.pinned = None;
+        *state = State::new(&state.get_keymap());
     }
 
     fn unseen_down(&self) -> bool {
@@ -115,23 +127,15 @@ impl HeldKeys {
     }
 }
 
-/// Presses a key again unless the mask lacks its modifiers.
-fn press(state: &mut State, keycode: Keycode, under: [u32; 4], mask: u32) -> bool {
+/// What a key alone holds: what its release would clear.
+fn own(state: &State, keycode: Keycode, under: [u32; 4]) -> u32 {
     let [depressed, latched, locked, group] = under;
-    // What the key alone holds: what its release would clear.
     let mut probe = State::new(&state.get_keymap());
     probe.update_mask(depressed, latched, locked, 0, 0, group);
     probe.update_key(keycode, xkb::KeyDirection::Down);
     let held = probe.serialize_mods(xkb::STATE_MODS_DEPRESSED);
     probe.update_key(keycode, xkb::KeyDirection::Up);
-    let own = held & !probe.serialize_mods(xkb::STATE_MODS_DEPRESSED);
-    if own & !mask != 0 {
-        // The mask says it went up.
-        return false;
-    }
-    state.update_mask(depressed, latched, locked, 0, 0, group);
-    state.update_key(keycode, xkb::KeyDirection::Down);
-    true
+    held & !probe.serialize_mods(xkb::STATE_MODS_DEPRESSED)
 }
 
 #[cfg(test)]
