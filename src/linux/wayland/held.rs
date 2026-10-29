@@ -31,7 +31,7 @@ impl HeldKeys {
         state.update_mask(depressed, latched, locked, 0, 0, group);
     }
 
-    /// A key's press or release, moving the state as xkb does.
+    /// Moves the state through a key, as xkb does.
     pub fn key(&mut self, state: &mut State, keycode: Keycode, pressed: bool) {
         let held = self.down.contains(&keycode);
         if pressed && held {
