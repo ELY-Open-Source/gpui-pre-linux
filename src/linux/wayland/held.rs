@@ -2,24 +2,33 @@
 
 use xkbcommon::xkb::{self, Keycode, State};
 
-/// The keys down, each with the modifiers its press added.
+/// The keys down, each with the group it went in.
 #[derive(Default)]
 pub(super) struct HeldKeys {
-    down: Vec<(Keycode, u32)>,
+    /// `None` for a key down before focus, unseen.
+    down: Vec<(Keycode, Option<u32>)>,
 }
 
 impl HeldKeys {
-    /// The compositor's mask, set over the keys' own state.
+    /// The compositor's mask: a fresh state, held keys pressed again.
     pub fn sent(&mut self, state: &mut State, mask: [u32; 4]) {
         let [depressed, latched, locked, group] = mask;
-        // A key's modifiers the mask leaves out: it went up.
-        self.down.retain(|(keycode, added)| {
-            let up = added & !depressed != 0;
-            if up {
-                state.update_key(*keycode, xkb::KeyDirection::Up);
+        *state = State::new(&state.get_keymap());
+        let mut kept = Vec::new();
+        for (keycode, pressed_in) in self.down.drain(..) {
+            let before = state.serialize_mods(xkb::STATE_MODS_DEPRESSED);
+            state.update_mask(before, 0, locked, 0, 0, pressed_in.unwrap_or(group));
+            state.update_key(keycode, xkb::KeyDirection::Down);
+            let added = state.serialize_mods(xkb::STATE_MODS_DEPRESSED) & !before;
+            if added & !depressed == 0 {
+                kept.push((keycode, pressed_in));
+            } else {
+                // The mask says it went up.
+                state.update_key(keycode, xkb::KeyDirection::Up);
             }
-            !up
-        });
+        }
+        self.down = kept;
+        // The mask wins; each key keeps what its release clears.
         state.update_mask(depressed, latched, locked, 0, 0, group);
     }
 
@@ -36,21 +45,14 @@ impl HeldKeys {
             state.update_key(keycode, xkb::KeyDirection::Up);
             return;
         }
-        let before = state.serialize_mods(xkb::STATE_MODS_DEPRESSED);
+        let group = state.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE);
         state.update_key(keycode, xkb::KeyDirection::Down);
-        let added = state.serialize_mods(xkb::STATE_MODS_DEPRESSED) & !before;
-        self.down.push((keycode, added));
+        self.down.push((keycode, Some(group)));
     }
 
-    /// Keys pressed unseen, as before focus: the mask's alone.
+    /// Keys down before focus; the next mask presses them again.
     pub fn unseen(&mut self, down: Vec<Keycode>) {
-        self.down = down.into_iter().map(|keycode| (keycode, 0)).collect();
-    }
-
-    /// The keys down, now pressed unseen by a new state.
-    pub fn rekeyed(&mut self) {
-        let down = self.down.iter().map(|(keycode, _)| *keycode).collect();
-        self.unseen(down);
+        self.down = down.into_iter().map(|keycode| (keycode, None)).collect();
     }
 
     /// Focus lost: no key is down here.
@@ -200,7 +202,6 @@ mod tests {
         key(&mut held, &mut state, SHIFT_L, true);
         key(&mut held, &mut state, SHIFT_R, true);
         state = us();
-        held.rekeyed();
         sent(&mut held, &mut state, 1, 0);
         key(&mut held, &mut state, SHIFT_L, false);
         assert_eq!(typed(&state, A), "A");
@@ -274,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn keys_held_on_entering_are_the_mask_s() {
+    fn keys_held_on_entering_are_pressed_in_the_mask_s_group() {
         // German group: Left Win and Right Alt are AltGr.
         let (mut held, mut state) = (HeldKeys::default(), layouts("us,de", "lv3:lwin_switch"));
         held.unseen(vec![Keycode::from(LWIN), Keycode::from(RALT)]);
@@ -310,5 +311,44 @@ mod tests {
         assert_eq!(typed(&state, Q), "@");
         key(&mut held, &mut state, Q, true);
         assert_eq!(typed(&state, Q), "q");
+    }
+
+    #[test]
+    fn a_key_held_unseen_outlasts_another_s_tap() {
+        // Left Shift held into the window; Right Shift tapped.
+        let (mut held, mut state) = (HeldKeys::default(), us());
+        held.unseen(vec![Keycode::from(SHIFT_L)]);
+        sent(&mut held, &mut state, 1, 0);
+        key(&mut held, &mut state, SHIFT_R, true);
+        key(&mut held, &mut state, SHIFT_R, false);
+        assert_eq!(typed(&state, A), "A");
+    }
+
+    #[test]
+    fn a_mask_releases_a_key_sharing_a_modifier() {
+        // Right Shift's release lost after Left Shift's came.
+        let (mut held, mut state) = (HeldKeys::default(), us());
+        sent(&mut held, &mut state, 0, 0);
+        key(&mut held, &mut state, SHIFT_L, true);
+        key(&mut held, &mut state, SHIFT_R, true);
+        key(&mut held, &mut state, SHIFT_L, false);
+        sent(&mut held, &mut state, 0, 0);
+        key(&mut held, &mut state, SHIFT_L, true);
+        key(&mut held, &mut state, SHIFT_L, false);
+        assert_eq!(typed(&state, A), "a");
+    }
+
+    #[test]
+    fn a_focus_lost_leaves_no_key_down() {
+        // Left Shift goes up outside the window.
+        let (mut held, mut state) = (HeldKeys::default(), us());
+        sent(&mut held, &mut state, 0, 0);
+        key(&mut held, &mut state, SHIFT_L, true);
+        held.clear();
+        held.unseen(Vec::new());
+        sent(&mut held, &mut state, 0, 0);
+        key(&mut held, &mut state, SHIFT_R, true);
+        key(&mut held, &mut state, SHIFT_R, false);
+        assert_eq!(typed(&state, A), "a");
     }
 }
