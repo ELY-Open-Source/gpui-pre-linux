@@ -74,7 +74,7 @@ impl HeldKeys {
     }
 }
 
-/// Presses a key again; lets go if the mask lacks it.
+/// Presses a key again, released if the mask lacks it.
 fn press(state: &mut State, keycode: Keycode, [group, locked]: [u32; 2], mask: u32) -> bool {
     let before = state.serialize_mods(xkb::STATE_MODS_DEPRESSED);
     state.update_mask(before, 0, locked, 0, 0, group);
