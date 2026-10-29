@@ -92,7 +92,7 @@ use crate::linux::{
     wayland::{
         clipboard::{Clipboard, DataOffer, FILE_LIST_MIME_TYPE, offers},
         cursor::Cursor,
-        held::{self, HeldMods},
+        held::HeldKeys,
         serial::{Serial, SerialKind, SerialTracker},
         to_shape,
         window::WaylandWindow,
@@ -375,7 +375,7 @@ pub(crate) struct WaylandClientState {
     wl_outputs: HashMap<ObjectId, wl_output::WlOutput>,
     keyboard_layout: LinuxKeyboardLayout,
     keymap_state: Option<xkb::State>,
-    held: HeldMods,
+    held: HeldKeys,
     compose_state: Option<xkb::compose::State>,
     drag: DragState,
     external_drag: Option<ExternalDrag>,
@@ -1036,7 +1036,7 @@ impl WaylandConnection {
             common,
             keyboard_layout: LinuxKeyboardLayout::new(UNKNOWN_KEYBOARD_LAYOUT_NAME),
             keymap_state: None,
-            held: HeldMods::default(),
+            held: HeldKeys::default(),
             compose_state: None,
             drag: DragState {
                 data_offer: None,
@@ -2001,9 +2001,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                     .flatten()
                     .expect("Failed to create keymap")
                 };
-                let keymap_state = xkb::State::new(&keymap);
-                state.held.rekeyed(&keymap_state);
-                state.keymap_state = Some(keymap_state);
+                state.keymap_state = Some(xkb::State::new(&keymap));
                 state.compose_state = get_xkb_compose_state(&xkb_context);
                 drop(state);
 
@@ -2012,17 +2010,13 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
             wl_keyboard::Event::Enter { surface, keys, .. } => {
                 state.keyboard_focused_window = get_window(&mut state, &surface.id());
                 state.enter_token = Some(());
-                let held = match &state.keymap_state {
-                    Some(keymap_state) => keys
-                        .chunks_exact(4)
-                        .map(|key| {
-                            let key = u32::from_ne_bytes(key.try_into().expect("four bytes"));
-                            let keycode = Keycode::from(key + MIN_KEYCODE);
-                            (keycode, held::bits(keymap_state, keycode))
-                        })
-                        .collect(),
-                    None => Vec::new(),
-                };
+                let held = keys
+                    .chunks_exact(4)
+                    .map(|key| {
+                        let key = u32::from_ne_bytes(key.try_into().expect("four bytes"));
+                        Keycode::from(key + MIN_KEYCODE)
+                    })
+                    .collect();
                 state.held.entered(held);
 
                 if let Some(window) = state.keyboard_focused_window.clone() {
@@ -2062,10 +2056,8 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                 let keymap_state = state_ref.keymap_state.as_mut().unwrap();
                 let old_layout =
                     keymap_state.serialize_layout(xkbcommon::xkb::STATE_LAYOUT_EFFECTIVE);
-                state_ref
-                    .held
-                    .sent(mods_depressed, mods_latched, mods_locked, group);
-                state_ref.held.apply(keymap_state);
+                let mask = [mods_depressed, mods_latched, mods_locked, group];
+                state_ref.held.sent(keymap_state, mask);
                 state.modifiers = modifiers_from_xkb(keymap_state);
                 let keymap_state = state.keymap_state.as_mut().unwrap();
                 state.capslock = capslock_from_xkb(keymap_state);
@@ -2103,29 +2095,26 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                 let keycode = Keycode::from(key + MIN_KEYCODE);
                 let keysym = keymap_state.key_get_one_sym(keycode);
 
-                // A forwarder may send a modifier's key without its mask.
-                let bit = held::bits(keymap_state, keycode);
-                if bit != 0 {
-                    let state_ref = &mut *state;
-                    let keymap_state = state_ref.keymap_state.as_mut().unwrap();
-                    state_ref
-                        .held
-                        .key(keycode, bit, key_state == wl_keyboard::KeyState::Pressed);
-                    state_ref.held.apply(keymap_state);
-                    let modifiers = modifiers_from_xkb(keymap_state);
-                    if modifiers == state.modifiers {
-                        return;
-                    }
+                // A forwarder may send keys without the mask they make.
+                let state_ref = &mut *state;
+                let keymap_state = state_ref.keymap_state.as_mut().unwrap();
+                let pressed = key_state == wl_keyboard::KeyState::Pressed;
+                state_ref.held.key(keymap_state, keycode, pressed);
+                let modifiers = modifiers_from_xkb(keymap_state);
+                let capslock = capslock_from_xkb(keymap_state);
+                if (modifiers, capslock) != (state.modifiers, state.capslock) {
                     log::debug!("{keysym:?} {key_state:?} without a mask: {modifiers:?}");
                     state.modifiers = modifiers;
+                    state.capslock = capslock;
                     let input = PlatformInput::ModifiersChanged(ModifiersChangedEvent {
                         modifiers,
-                        capslock: state.capslock,
+                        capslock,
                     });
                     drop(state);
                     focused_window.handle_input(input);
-                    return;
+                    state = client.borrow_mut();
                 }
+                let keymap_state = state.keymap_state.as_ref().unwrap();
 
                 match key_state {
                     wl_keyboard::KeyState::Pressed if !keysym.is_modifier_key() => {
