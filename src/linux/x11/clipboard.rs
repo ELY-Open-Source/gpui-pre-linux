@@ -19,7 +19,6 @@
 // https://freedesktop.org/wiki/ClipboardManager/
 
 use std::{
-    borrow::Cow,
     cell::RefCell,
     collections::{HashMap, hash_map::Entry},
     sync::{
@@ -47,7 +46,10 @@ use x11rb::{
     wrapper::ConnectionExt as _,
 };
 
-use gpui::{ClipboardItem, Image, ImageFormat, hash};
+use crate::linux::{paths_of, uri_list};
+use gpui::{
+    ClipboardEntry, ClipboardItem, ClipboardString, ExternalPaths, Image, ImageFormat, hash,
+};
 use strum::IntoEnumIterator;
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -78,7 +80,7 @@ x11rb::atom_manager! {
         TEXT_MIME_UNKNOWN: b"text/plain",
 
         // HTML: b"text/html",
-        // URI_LIST: b"text/uri-list",
+        URI_LIST: b"text/uri-list",
 
         PNG__MIME: ImageFormat::mime_type(ImageFormat::Png ).as_bytes(),
         JPEG_MIME: ImageFormat::mime_type(ImageFormat::Jpeg).as_bytes(),
@@ -981,16 +983,33 @@ impl Clipboard {
         Ok(Self { inner: ctx })
     }
 
-    pub(crate) fn set_text(
+    /// Writes every entry: text as UTF-8, an image as its type, files as a URI list.
+    pub(crate) fn set_item(
         &self,
-        message: Cow<'_, str>,
+        item: &ClipboardItem,
         selection: ClipboardKind,
         wait: WaitConfig,
     ) -> Result<()> {
-        let data = vec![ClipboardData {
-            bytes: message.into_owned().into_bytes(),
-            format: self.inner.atoms.UTF8_STRING,
-        }];
+        let mut data = Vec::new();
+        if let Some(text) = item.text() {
+            data.push(ClipboardData {
+                bytes: text.into_bytes(),
+                format: self.inner.atoms.UTF8_STRING,
+            });
+        }
+        for entry in &item.entries {
+            match entry {
+                ClipboardEntry::Image(image) => data.push(ClipboardData {
+                    bytes: image.bytes.clone(),
+                    format: self.image_format_atom(image.format),
+                }),
+                ClipboardEntry::ExternalPaths(paths) => data.push(ClipboardData {
+                    bytes: uri_list(paths.paths().iter().map(|path| path.as_path())).into_bytes(),
+                    format: self.inner.atoms.URI_LIST,
+                }),
+                ClipboardEntry::String(_) => {}
+            }
+        }
         self.inner.write(data, selection, wait)
     }
 
@@ -1008,26 +1027,46 @@ impl Clipboard {
         }
     }
 
-    #[allow(unused)]
-    pub(crate) fn set_image(
-        &self,
-        image: Image,
-        selection: ClipboardKind,
-        wait: WaitConfig,
-    ) -> Result<()> {
-        let format = self.image_format_atom(image.format);
-        let data = vec![ClipboardData {
-            bytes: image.bytes,
-            format: self.inner.atoms.PNG__MIME,
-        }];
-        self.inner.write(data, selection, wait)
+    /// Reads its files, text and first image together.
+    pub(crate) fn get_any(&self, selection: ClipboardKind) -> Result<ClipboardItem> {
+        let mut entries = Vec::new();
+        entries.extend(self.get_files(selection)?);
+        entries.extend(self.get_text(selection)?);
+        entries.extend(self.get_image(selection)?);
+        if entries.is_empty() {
+            return Err(Error::ContentNotAvailable);
+        }
+        Ok(ClipboardItem { entries })
     }
 
-    pub(crate) fn get_any(&self, selection: ClipboardKind) -> Result<ClipboardItem> {
-        let image_entries = ImageFormat::iter()
-            .map(|format| (self.image_format_atom(format), format))
-            .collect::<Vec<_>>();
+    /// One kind of entry; none where the selection holds no such format.
+    fn get_kind(
+        &self,
+        formats: &[Atom],
+        selection: ClipboardKind,
+    ) -> Result<Option<ClipboardData>> {
+        match self.inner.read(formats, selection) {
+            Ok(data) => {
+                log::trace!(
+                    "read clipboard as format {:?}",
+                    self.inner.atom_name(data.format)
+                );
+                Ok(Some(data))
+            }
+            Err(Error::ContentNotAvailable) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
 
+    fn get_files(&self, selection: ClipboardKind) -> Result<Option<ClipboardEntry>> {
+        let Some(data) = self.get_kind(&[self.inner.atoms.URI_LIST], selection)? else {
+            return Ok(None);
+        };
+        let paths = paths_of(&data.bytes);
+        Ok((!paths.is_empty()).then(|| ClipboardEntry::ExternalPaths(ExternalPaths(paths))))
+    }
+
+    fn get_text(&self, selection: ClipboardKind) -> Result<Option<ClipboardEntry>> {
         let text_format_atoms: &[Atom] = &[
             self.inner.atoms.UTF8_STRING,
             self.inner.atoms.UTF8_MIME_0,
@@ -1036,32 +1075,9 @@ impl Clipboard {
             self.inner.atoms.TEXT,
             self.inner.atoms.TEXT_MIME_UNKNOWN,
         ];
-
-        // image formats first, as they are more specific, and read will return the first
-        // format that the contents can be converted to
-        let mut format_atoms = Vec::with_capacity(image_entries.len() + text_format_atoms.len());
-        format_atoms.extend(image_entries.iter().map(|(atom, _)| *atom));
-        format_atoms.extend_from_slice(text_format_atoms);
-
-        let result = self.inner.read(&format_atoms, selection)?;
-
-        log::trace!(
-            "read clipboard as format {:?}",
-            self.inner.atom_name(result.format)
-        );
-
-        for (format_atom, image_format) in image_entries {
-            if result.format == format_atom {
-                let bytes = result.bytes;
-                let id = hash(&bytes);
-                return Ok(ClipboardItem::new_image(&Image {
-                    id,
-                    format: image_format,
-                    bytes,
-                }));
-            }
-        }
-
+        let Some(result) = self.get_kind(text_format_atoms, selection)? else {
+            return Ok(None);
+        };
         let text = if result.format == self.inner.atoms.STRING {
             // ISO Latin-1
             // See: https://stackoverflow.com/questions/28169745/what-are-the-options-to-convert-iso-8859-1-latin-1-to-a-string-utf-8
@@ -1069,7 +1085,28 @@ impl Clipboard {
         } else {
             String::from_utf8(result.bytes).map_err(|_| Error::ConversionFailure)?
         };
-        Ok(ClipboardItem::new_string(text))
+        Ok(Some(ClipboardEntry::String(ClipboardString::new(text))))
+    }
+
+    fn get_image(&self, selection: ClipboardKind) -> Result<Option<ClipboardEntry>> {
+        let image_entries = ImageFormat::iter()
+            .map(|format| (self.image_format_atom(format), format))
+            .collect::<Vec<_>>();
+        let atoms: Vec<Atom> = image_entries.iter().map(|(atom, _)| *atom).collect();
+        let Some(result) = self.get_kind(&atoms, selection)? else {
+            return Ok(None);
+        };
+        let format = image_entries
+            .iter()
+            .find(|(atom, _)| *atom == result.format)
+            .map(|(_, format)| *format)
+            .ok_or(Error::ConversionFailure)?;
+        let id = hash(&result.bytes);
+        Ok(Some(ClipboardEntry::Image(Image {
+            id,
+            format,
+            bytes: result.bytes,
+        })))
     }
 
     pub fn is_owner(&self, selection: ClipboardKind) -> bool {
