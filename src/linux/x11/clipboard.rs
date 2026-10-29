@@ -33,13 +33,13 @@ use std::{
 use parking_lot::{Condvar, Mutex, MutexGuard, RwLock};
 use x11rb::{
     COPY_DEPTH_FROM_PARENT, COPY_FROM_PARENT, NONE,
-    connection::Connection,
+    connection::{Connection, RequestConnection as _},
     protocol::{
         Event,
         xproto::{
-            Atom, AtomEnum, ConnectionExt as _, CreateWindowAux, EventMask, PropMode, Property,
-            PropertyNotifyEvent, SELECTION_NOTIFY_EVENT, SelectionNotifyEvent,
-            SelectionRequestEvent, Time, WindowClass,
+            Atom, AtomEnum, ChangeWindowAttributesAux, ConnectionExt as _, CreateWindowAux,
+            EventMask, PropMode, Property, PropertyNotifyEvent, SELECTION_NOTIFY_EVENT,
+            SelectionNotifyEvent, SelectionRequestEvent, Time, Window, WindowClass,
         },
     },
     rust_connection::RustConnection,
@@ -204,6 +204,16 @@ struct ClipboardData {
     /// The atom representing the format in which the data is encoded.
     format: Atom,
 }
+
+/// A selection sent in INCR segments, as ICCCM 2.7.2 asks of large data.
+struct Sending {
+    target: Atom,
+    bytes: Vec<u8>,
+    at: usize,
+}
+
+/// Transfers under way, by the requestor's window and property.
+type Transfers = HashMap<(Window, Atom), Sending>;
 
 enum ReadSelNotifyResult {
     GotData(ClipboardData),
@@ -670,7 +680,47 @@ impl Inner {
         Ok(false)
     }
 
-    fn handle_selection_request(&self, event: SelectionRequestEvent) -> Result<()> {
+    /// The most bytes one property change carries, well inside the request limit.
+    fn chunk(&self) -> usize {
+        (self.server.conn.maximum_request_bytes() / 4).max(4096)
+    }
+
+    /// The next segment of an INCR transfer, once its requestor deleted the last.
+    fn send_segment(&self, event: &PropertyNotifyEvent, transfers: &mut Transfers) -> Result<()> {
+        let key = (event.window, event.atom);
+        let Some(sending) = transfers.get_mut(&key) else {
+            return Ok(());
+        };
+        let end = (sending.at + self.chunk()).min(sending.bytes.len());
+        let segment = &sending.bytes[sending.at..end];
+        let last = segment.is_empty();
+        self.server
+            .conn
+            .change_property8(
+                PropMode::REPLACE,
+                event.window,
+                event.atom,
+                sending.target,
+                segment,
+            )
+            .map_err(into_unknown)?;
+        sending.at = end;
+        if last {
+            transfers.remove(&key);
+            let aux = ChangeWindowAttributesAux::new().event_mask(EventMask::NO_EVENT);
+            self.server
+                .conn
+                .change_window_attributes(event.window, &aux)
+                .map_err(into_unknown)?;
+        }
+        self.server.conn.flush().map_err(into_unknown)
+    }
+
+    fn handle_selection_request(
+        &self,
+        event: SelectionRequestEvent,
+        transfers: &mut Transfers,
+    ) -> Result<()> {
         let selection = match self.kind_of(event.selection) {
             Some(kind) => kind,
             None => {
@@ -721,6 +771,36 @@ impl Inner {
             let data = self.selection_of(selection).data.read();
             if let Some(data_list) = &*data {
                 success = match data_list.iter().find(|d| d.format == event.target) {
+                    Some(data) if data.bytes.len() > self.chunk() => {
+                        // Too large for one request: its length, then segments.
+                        let aux =
+                            ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE);
+                        self.server
+                            .conn
+                            .change_window_attributes(event.requestor, &aux)
+                            .map_err(into_unknown)?;
+                        let length = u32::try_from(data.bytes.len())
+                            .map_err(|_| Error::unknown("a selection past 4 GiB"))?;
+                        self.server
+                            .conn
+                            .change_property32(
+                                PropMode::REPLACE,
+                                event.requestor,
+                                event.property,
+                                self.atoms.INCR,
+                                &[length],
+                            )
+                            .map_err(into_unknown)?;
+                        self.server.conn.flush().map_err(into_unknown)?;
+                        log::debug!("clipboard: {} bytes go in INCR segments", data.bytes.len());
+                        let sending = Sending {
+                            target: event.target,
+                            bytes: data.bytes.clone(),
+                            at: 0,
+                        };
+                        transfers.insert((event.requestor, event.property), sending);
+                        true
+                    }
                     Some(data) => {
                         self.server
                             .conn
@@ -855,6 +935,7 @@ fn serve_requests(context: Arc<Inner>) -> Result<(), Box<dyn std::error::Error>>
 
     let mut written = false;
     let mut notified = false;
+    let mut transfers = Transfers::new();
 
     loop {
         match context.server.conn.wait_for_event().map_err(into_unknown)? {
@@ -890,9 +971,9 @@ fn serve_requests(context: Arc<Inner>) -> Result<(), Box<dyn std::error::Error>>
                     context.atom_name(event.target),
                 );
                 // Someone is requesting the clipboard content from us.
-                context
-                    .handle_selection_request(event)
-                    .map_err(into_unknown)?;
+                if let Err(error) = context.handle_selection_request(event, &mut transfers) {
+                    log::warn!("clipboard: a selection request failed: {error}");
+                }
 
                 // if we are in the progress of saving to the clipboard manager
                 // make sure we save that we have finished writing
@@ -940,6 +1021,12 @@ fn serve_requests(context: Arc<Inner>) -> Result<(), Box<dyn std::error::Error>>
                     if written {
                         handover_finished(&context, handover_state);
                     }
+                }
+            }
+            Event::PropertyNotify(event) if event.state == Property::DELETE => {
+                if let Err(error) = context.send_segment(&event, &mut transfers) {
+                    log::warn!("clipboard: an INCR segment failed: {error}");
+                    transfers.remove(&(event.window, event.atom));
                 }
             }
             _event => {
