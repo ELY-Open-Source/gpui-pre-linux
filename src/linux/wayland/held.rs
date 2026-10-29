@@ -36,13 +36,13 @@ impl HeldMods {
         *self = Self::default();
     }
 
-    /// A new keymap: a fresh state, held keys reread.
-    pub fn rekeyed(&mut self, keymap: &xkb::Keymap) {
+    /// A new keymap's fresh state, held keys reread through it.
+    pub fn rekeyed(&mut self, state: &State) {
         let held = std::mem::take(&mut self.held);
         self.clear();
         self.held = held
             .into_iter()
-            .map(|(keycode, _)| (keycode, bits(keymap, keycode)))
+            .map(|(keycode, _)| (keycode, bits(state, keycode)))
             .filter(|(_, bits)| *bits != 0)
             .collect();
     }
@@ -72,12 +72,20 @@ impl HeldMods {
     }
 }
 
-/// The modifiers a key holds, as the keymap sets them.
-pub(super) fn bits(keymap: &xkb::Keymap, keycode: Keycode) -> u32 {
-    let mut state = State::new(keymap);
-    state.update_key(keycode, xkb::KeyDirection::Down);
+/// A key's modifiers in this group, as the keymap sets them.
+pub(super) fn bits(state: &State, keycode: Keycode) -> u32 {
+    // At this level the key may type, as Multi_key does.
+    if !state.key_get_one_sym(keycode).is_modifier_key() {
+        return 0;
+    }
+    let mut probe = State::new(&state.get_keymap());
+    let locked = state.serialize_mods(xkb::STATE_MODS_LOCKED);
+    let group = state.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE);
+    probe.update_mask(0, 0, locked, 0, 0, group);
+    probe.update_key(keycode, xkb::KeyDirection::Down);
     // A lock key toggles what it locks, holding nothing.
-    state.serialize_mods(xkb::STATE_MODS_DEPRESSED) & !state.serialize_mods(xkb::STATE_MODS_LOCKED)
+    let toggled = probe.serialize_mods(xkb::STATE_MODS_LOCKED) ^ locked;
+    probe.serialize_mods(xkb::STATE_MODS_DEPRESSED) & !toggled
 }
 
 #[cfg(test)]
@@ -94,11 +102,17 @@ mod tests {
     const LWIN: u32 = 125 + 8;
     const RWIN: u32 = 126 + 8;
 
+    const RALT: u32 = 100 + 8;
+
     fn keymap(options: &str) -> xkb::Keymap {
+        layouts("us", options)
+    }
+
+    fn layouts(layouts: &str, options: &str) -> xkb::Keymap {
         let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
         let options = Some(options.to_string()).filter(|options| !options.is_empty());
-        xkb::Keymap::new_from_names(&context, "", "", "us", "", options, 0)
-            .expect("the us keymap compiles")
+        xkb::Keymap::new_from_names(&context, "", "", layouts, "", options, 0)
+            .expect("the keymap compiles")
     }
 
     fn us() -> State {
@@ -108,7 +122,7 @@ mod tests {
     /// Plays a modifier key as the Wayland client hears it.
     fn key(held: &mut HeldMods, state: &mut State, keycode: u32, pressed: bool) {
         let keycode = Keycode::from(keycode);
-        let bit = bits(&state.get_keymap(), keycode);
+        let bit = bits(&state, keycode);
         assert_ne!(bit, 0, "keycode {keycode:?} holds a modifier");
         held.key(keycode, bit, pressed);
         held.apply(state);
@@ -119,7 +133,7 @@ mod tests {
             .iter()
             .map(|keycode| {
                 let keycode = Keycode::from(*keycode);
-                (keycode, bits(&state.get_keymap(), keycode))
+                (keycode, bits(&state, keycode))
             })
             .collect();
         held.entered(keys);
@@ -199,12 +213,8 @@ mod tests {
         key(&mut held, &mut state, SHIFT_L, false);
         sent(&mut held, &mut state, 0);
         assert!(!modifiers_from_xkb(&state).shift);
-        assert_eq!(bits(&state.get_keymap(), Keycode::from(A)), 0);
-        assert_eq!(
-            bits(&state.get_keymap(), Keycode::from(58u32 + 8)),
-            0,
-            "Caps Lock locks"
-        );
+        assert_eq!(bits(&state, Keycode::from(A)), 0);
+        assert_eq!(bits(&state, Keycode::from(58u32 + 8)), 0, "Caps Lock locks");
     }
 
     #[test]
@@ -237,7 +247,7 @@ mod tests {
         key(&mut held, &mut state, SHIFT_R, true);
         let next = keymap("");
         state = State::new(&next);
-        held.rekeyed(&next);
+        held.rekeyed(&state);
         sent(&mut held, &mut state, 1);
         key(&mut held, &mut state, SHIFT_L, false);
         assert_eq!(state.key_get_utf8(Keycode::from(A)), "A");
@@ -255,5 +265,38 @@ mod tests {
         let modifiers = modifiers_from_xkb(&state);
         assert!(!modifiers.alt && modifiers.platform, "{modifiers:?}");
         assert_eq!(modifiers, platform);
+    }
+
+    #[test]
+    fn a_key_whose_symbol_here_holds_nothing_types() {
+        // Shift with Right Alt is Multi_key under ralt_switch_multikey.
+        let (mut held, mut state) = (
+            HeldMods::default(),
+            State::new(&keymap("lv3:ralt_switch_multikey")),
+        );
+        sent(&mut held, &mut state, 0);
+        key(&mut held, &mut state, SHIFT_L, true);
+        let ralt = Keycode::from(RALT);
+        assert_eq!(state.key_get_one_sym(ralt), xkb::Keysym::Multi_key);
+        assert_eq!(bits(&state, ralt), 0);
+    }
+
+    #[test]
+    fn a_key_holds_what_its_group_maps_it_to() {
+        // In the German group Right Alt is AltGr, like Left Win.
+        let (mut held, mut state) = (
+            HeldMods::default(),
+            State::new(&layouts("us,de", "lv3:lwin_switch")),
+        );
+        held.sent(0, 0, 0, 1);
+        held.apply(&mut state);
+        key(&mut held, &mut state, LWIN, true);
+        let mask = held.depressed();
+        held.sent(mask, 0, 0, 1);
+        held.apply(&mut state);
+        key(&mut held, &mut state, RALT, true);
+        let modifiers = modifiers_from_xkb(&state);
+        assert!(!modifiers.alt, "{modifiers:?}");
+        assert_eq!(held.depressed(), mask);
     }
 }
