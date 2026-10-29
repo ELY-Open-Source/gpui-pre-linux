@@ -19,7 +19,7 @@ const KEYMAPS: [(&str, &str); 14] = [
 ];
 
 /// Random keys; the first `entering` and those `away` go unseen.
-fn fuzz(entering: usize, steps: usize, away: std::ops::Range<usize>) {
+fn fuzz(entering: usize, steps: usize, away: std::ops::Range<usize>, hiding: bool) {
     let keys = [
         SHIFT_L, SHIFT_R, CONTROL_L, RCONTROL, LALT, RALT, LWIN, RWIN, CAPS, MENU, A, Q,
     ];
@@ -32,7 +32,7 @@ fn fuzz(entering: usize, steps: usize, away: std::ops::Range<usize>) {
             let mut played = Vec::new();
             for step in 0..entering + steps {
                 if step == away.start {
-                    held.left(&mut state);
+                    held.left();
                 }
                 if step == entering || step == away.end {
                     // Focus comes: the keys down, then the mask.
@@ -56,6 +56,14 @@ fn fuzz(entering: usize, steps: usize, away: std::ops::Range<usize>) {
                         .update_key(Keycode::from(keycode), direction(pressed));
                     continue;
                 }
+                // A binding the compositor takes: its masks alone come.
+                if hiding && (random >> 20) % 8 == 0 {
+                    compositor
+                        .state
+                        .update_key(Keycode::from(keycode), direction(pressed));
+                    compositor.send(&mut held, &mut state);
+                    continue;
+                }
                 compositor.play(&mut held, &mut state, keycode, pressed);
                 if let Some(difference) = compositor.differs(&state) {
                     panic!("{names} {options}, seed {seed}, after {played:?}: {difference}");
@@ -67,15 +75,20 @@ fn fuzz(entering: usize, steps: usize, away: std::ops::Range<usize>) {
 
 #[test]
 fn focus_lost_and_found_is_matched_at_every_key() {
-    fuzz(0, 40, 15..22);
+    fuzz(0, 40, 15..22, false);
 }
 
 #[test]
 fn keys_held_into_the_window_are_matched_at_every_key() {
-    fuzz(6, 30, 0..0);
+    fuzz(6, 30, 0..0, false);
 }
 
 #[test]
 fn a_compositor_sending_its_mask_is_matched_at_every_key() {
-    fuzz(0, 40, 0..0);
+    fuzz(0, 40, 0..0, false);
+}
+
+#[test]
+fn keys_a_compositor_takes_are_matched_at_every_key() {
+    fuzz(0, 40, 0..0, true);
 }

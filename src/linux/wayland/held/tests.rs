@@ -27,8 +27,10 @@ fn us() -> State {
     layouts("us", "")
 }
 
+/// A key no mask follows: the next key settles it.
 fn key(held: &mut HeldKeys, state: &mut State, keycode: u32, pressed: bool) {
     held.key(state, Keycode::from(keycode), pressed);
+    held.settle(state);
 }
 
 fn sent(held: &mut HeldKeys, state: &mut State, depressed: u32, group: u32) {
@@ -281,7 +283,7 @@ fn a_focus_lost_leaves_no_key_down() {
     let (mut held, mut state) = (HeldKeys::default(), us());
     sent(&mut held, &mut state, 0, 0);
     key(&mut held, &mut state, SHIFT_L, true);
-    held.left(&mut state);
+    held.left();
     held.unseen(Vec::new());
     sent(&mut held, &mut state, 0, 0);
     key(&mut held, &mut state, SHIFT_R, true);
@@ -295,10 +297,11 @@ fn a_focus_lost_keeps_the_layout_shown() {
     let (mut held, mut state) = (HeldKeys::default(), layouts("us,de", ""));
     sent(&mut held, &mut state, 0, 1);
     key(&mut held, &mut state, SHIFT_L, true);
-    held.left(&mut state);
-    assert_eq!(state.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE), 1);
-    assert_eq!(state.serialize_mods(xkb::STATE_MODS_LOCKED), 16);
-    assert!(!modifiers_from_xkb(&state).shift);
+    held.left();
+    let shadow = held.shadow.as_ref().expect("a shadow");
+    assert_eq!(shadow.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE), 1);
+    assert_eq!(shadow.serialize_mods(xkb::STATE_MODS_LOCKED), 16);
+    assert!(!modifiers_from_xkb(shadow).shift);
 }
 
 mod compositor;

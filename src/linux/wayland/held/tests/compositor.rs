@@ -66,8 +66,10 @@ impl Compositor {
     fn play(&mut self, held: &mut HeldKeys, state: &mut State, keycode: u32, pressed: bool) {
         self.state
             .update_key(Keycode::from(keycode), direction(pressed));
-        key(held, state, keycode, pressed);
+        held.key(state, Keycode::from(keycode), pressed);
         self.send(held, state);
+        // The next key comes: no mask came, the shadow's.
+        held.settle(state);
     }
 
     /// The compositor's mask, sent when it changed.
@@ -197,7 +199,7 @@ fn a_focus_lost_resets_the_keys_state() {
     for (keycode, pressed) in [(CONTROL_L, true), (SHIFT_L, true), (CONTROL_L, false)] {
         compositor.play(&mut held, &mut state, keycode, pressed);
     }
-    held.left(&mut state);
+    held.left();
     compositor
         .state
         .update_key(Keycode::from(SHIFT_L), direction(false));
@@ -227,6 +229,35 @@ fn an_unseen_key_s_release_keeps_a_latch_s_history() {
         (CAPS, false),
     ] {
         compositor.play(&mut held, &mut state, keycode, pressed);
+        assert_eq!(compositor.differs(&state), None);
+    }
+}
+
+#[test]
+fn a_key_the_compositor_takes_moves_only_its_masks() {
+    // AltGr and Caps held; a media key the compositor binds.
+    let options = "lv3:caps_switch_latch";
+    let (mut held, mut state) = (HeldKeys::default(), layouts("de", options));
+    let mut compositor = Compositor::new(layouts("de", options));
+    let play = 172 + 8;
+    for (keycode, pressed, seen) in [
+        (RALT, true, true),
+        (CAPS, true, true),
+        (play, true, false),
+        (play, false, false),
+        (CAPS, false, true),
+        (CAPS, true, true),
+        (LALT, true, true),
+        (RALT, false, true),
+    ] {
+        if seen {
+            compositor.play(&mut held, &mut state, keycode, pressed);
+        } else {
+            compositor
+                .state
+                .update_key(Keycode::from(keycode), direction(pressed));
+            compositor.send(&mut held, &mut state);
+        }
         assert_eq!(compositor.differs(&state), None);
     }
 }
