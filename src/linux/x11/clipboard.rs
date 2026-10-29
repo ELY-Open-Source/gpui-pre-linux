@@ -30,6 +30,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use std::os::fd::AsRawFd;
+
 use parking_lot::{Condvar, Mutex, MutexGuard, RwLock};
 use x11rb::{
     COPY_DEPTH_FROM_PARENT, COPY_FROM_PARENT, NONE,
@@ -725,6 +727,55 @@ impl Inner {
         self.server.conn.flush().map_err(into_unknown)
     }
 
+    /// The next event; none once a transfer's deadline comes first.
+    fn next_event(&self, transfers: &Transfers) -> Result<Option<Event>> {
+        loop {
+            if let Some(event) = self.server.conn.poll_for_event().map_err(into_unknown)? {
+                return Ok(Some(event));
+            }
+            let Some(oldest) = transfers.values().map(|sending| sending.moved).min() else {
+                return self
+                    .server
+                    .conn
+                    .wait_for_event()
+                    .map(Some)
+                    .map_err(into_unknown);
+            };
+            let left = (oldest + STALLED).saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(None);
+            }
+            let fd = self.server.conn.stream().as_raw_fd();
+            let mut poll = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let wait = i32::try_from(left.as_millis() + 1).unwrap_or(i32::MAX);
+            // SAFETY: one pollfd for the connection's live socket.
+            unsafe { libc::poll(&mut poll, 1, wait) };
+        }
+    }
+
+    /// Drops transfers whose requestor took nothing for `STALLED`.
+    fn drop_stalled(&self, transfers: &mut Transfers) {
+        let stalled: Vec<(Window, Atom)> = transfers
+            .iter()
+            .filter(|(_, sending)| sending.moved.elapsed() > STALLED)
+            .map(|(key, _)| *key)
+            .collect();
+        for (window, atom) in stalled {
+            log::warn!("clipboard: a requestor stalled an INCR transfer; dropped");
+            transfers.remove(&(window, atom));
+            if !transfers.keys().any(|(other, _)| *other == window) {
+                let aux = ChangeWindowAttributesAux::new().event_mask(EventMask::NO_EVENT);
+                if let Err(error) = self.server.conn.change_window_attributes(window, &aux) {
+                    log::warn!("clipboard: a stalled requestor's events stay: {error}");
+                }
+            }
+        }
+    }
+
     fn handle_selection_request(
         &self,
         event: SelectionRequestEvent,
@@ -948,12 +999,10 @@ fn serve_requests(context: Arc<Inner>) -> Result<(), Box<dyn std::error::Error>>
     let mut transfers = Transfers::new();
 
     loop {
-        let event = context.server.conn.wait_for_event().map_err(into_unknown)?;
-        let stalled = |sending: &Sending| sending.moved.elapsed() > STALLED;
-        if transfers.values().any(stalled) {
-            log::warn!("clipboard: a requestor stalled an INCR transfer; dropped");
-            transfers.retain(|_, sending| !stalled(sending));
-        }
+        context.drop_stalled(&mut transfers);
+        let Some(event) = context.next_event(&transfers).map_err(into_unknown)? else {
+            continue;
+        };
         match event {
             // A requestor gone takes its transfers along.
             Event::DestroyNotify(event) if event.window != context.server.win_id => {

@@ -7,8 +7,10 @@ use std::{
 use calloop::{LoopHandle, PostAction};
 use filedescriptor::Pipe;
 use strum::IntoEnumIterator;
+use wayland_client::protocol::wl_data_source::WlDataSource;
 use wayland_client::{Connection, protocol::wl_data_offer::WlDataOffer};
 use wayland_protocols::wp::primary_selection::zv1::client::zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1;
+use wayland_protocols::wp::primary_selection::zv1::client::zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1;
 
 use crate::linux::platform::{PIPE_READ_TIMEOUT, read_fd_with_timeout};
 use crate::linux::{paths_of, uri_list};
@@ -35,6 +37,9 @@ pub(crate) struct Clipboard {
     /// Whether this client set the selection, its offer still to come or here.
     claimed: bool,
     primary_claimed: bool,
+    /// The sources it set; another's cancels them.
+    source: Option<WlDataSource>,
+    primary_source: Option<ZwpPrimarySelectionSourceV1>,
 
     // External clipboard
     cached_read: Option<ClipboardItem>,
@@ -208,6 +213,8 @@ impl Clipboard {
             primary_contents: None,
             claimed: false,
             primary_claimed: false,
+            source: None,
+            primary_source: None,
 
             cached_read: None,
             current_offer: None,
@@ -217,15 +224,35 @@ impl Clipboard {
     }
 
     /// Holds `item` as the selection this client just set.
-    pub fn set(&mut self, item: ClipboardItem) {
+    pub fn set(&mut self, item: ClipboardItem, source: WlDataSource) {
         self.contents = Some(item);
         self.claimed = true;
+        self.source = Some(source);
+    }
+
+    /// Another client took the selection, though this one may not see its offer.
+    pub fn cancelled(&mut self, source: &WlDataSource) {
+        if self.source.as_ref() == Some(source) {
+            self.source = None;
+            self.claimed = false;
+            self.set_offer(None);
+        }
     }
 
     /// Holds `item` as the primary selection this client just set.
-    pub fn set_primary(&mut self, item: ClipboardItem) {
+    pub fn set_primary(&mut self, item: ClipboardItem, source: ZwpPrimarySelectionSourceV1) {
         self.primary_contents = Some(item);
         self.primary_claimed = true;
+        self.primary_source = Some(source);
+    }
+
+    /// Another client took the primary selection.
+    pub fn primary_cancelled(&mut self, source: &ZwpPrimarySelectionSourceV1) {
+        if self.primary_source.as_ref() == Some(source) {
+            self.primary_source = None;
+            self.primary_claimed = false;
+            self.set_primary_offer(None);
+        }
     }
 
     pub fn set_offer(&mut self, data_offer: Option<DataOffer<WlDataOffer>>) {

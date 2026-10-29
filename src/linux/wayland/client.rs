@@ -1395,7 +1395,7 @@ impl WaylandConnection {
             }
             data_source.offer(state.clipboard.self_mime());
             primary_selection.set_selection(Some(&data_source), serial.as_raw());
-            state.clipboard.set_primary(item);
+            state.clipboard.set_primary(item, data_source);
         } else {
             log::warn!(
                 "Skipping Wayland primary selection ownership request because no window has focus"
@@ -1426,7 +1426,7 @@ impl WaylandConnection {
             }
             data_source.offer(state.clipboard.self_mime());
             data_device.set_selection(Some(&data_source), serial.as_raw());
-            state.clipboard.set(item);
+            state.clipboard.set(item, data_source);
         } else {
             log::warn!("Skipping Wayland clipboard ownership request because no window has focus");
         }
@@ -2967,6 +2967,7 @@ impl Dispatch<wl_data_source::WlDataSource, DataSourceKind> for WaylandClientSta
                 state.clipboard.send(mime_type, fd);
             }
             (DataSourceKind::Clipboard, wl_data_source::Event::Cancelled) => {
+                state.clipboard.cancelled(data_source);
                 data_source.destroy();
             }
             (DataSourceKind::Drag, wl_data_source::Event::Send { fd, .. }) => {
@@ -3066,13 +3067,14 @@ impl Dispatch<zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1, ()>
         _: &QueueHandle<Self>,
     ) {
         let client = this.get_client();
-        let state = client.borrow_mut();
+        let mut state = client.borrow_mut();
 
         match event {
             zwp_primary_selection_source_v1::Event::Send { mime_type, fd } => {
                 state.clipboard.send_primary(mime_type, fd);
             }
             zwp_primary_selection_source_v1::Event::Cancelled => {
+                state.clipboard.primary_cancelled(selection_source);
                 selection_source.destroy();
             }
             _ => {}
