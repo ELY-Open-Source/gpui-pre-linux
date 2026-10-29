@@ -306,7 +306,7 @@ fn a_focus_lost_keeps_the_layout_shown() {
 
 #[test]
 fn a_release_no_mask_follows_settles_for_any_reader() {
-    // Shift, a, Shift up; a click, not a key, reads next.
+    // Shift, a, Shift up; then a click, not a key.
     let (mut held, mut state) = (HeldKeys::default(), us());
     sent(&mut held, &mut state, 0, 0);
     for (keycode, pressed) in [(SHIFT_L, true), (A, true), (A, false)] {
