@@ -34,9 +34,8 @@ impl HeldKeys {
         self.ahead = false;
         self.inferred = [0; 3];
         let shadow = shadow(&mut self.shadow, state);
-        let seen = self.down.iter().fold(0, |seen, down| seen | down.own);
-        // A seen key's modifier the mask lacks: a lost release.
-        if shadow.serialize_mods(xkb::STATE_MODS_DEPRESSED) & !depressed & seen != 0 {
+        // A mask the shadow did not foresee: it missed something.
+        if serialized(shadow) != mask {
             *shadow = State::new(&shadow.get_keymap());
             // Seen keys again, each under the state its press found.
             self.down.retain(|down| match down.under {
@@ -82,14 +81,16 @@ impl HeldKeys {
         } else {
             shadow.update_key(keycode, xkb::KeyDirection::Up);
         }
+        let [depressed, latched, locked, group] = serialized(shadow);
         if !self.down.iter().any(|down| down.under.is_none()) {
-            self.pinned = None;
+            // The last unseen key went: what only the hold held, too.
+            let seen = self.down.iter().fold(0, |seen, down| seen | down.own);
+            let gone = self.pinned.take().unwrap_or(0) & !seen;
+            shadow.update_mask(depressed & !gone, latched, locked, 0, 0, group);
         }
         // Unseen keys still hold what the mask said they did.
         let pinned = self.pinned.unwrap_or(0);
-        let depressed = shadow.serialize_mods(xkb::STATE_MODS_DEPRESSED);
         if pinned & !depressed != 0 {
-            let [_, latched, locked, group] = serialized(shadow);
             shadow.update_mask(depressed | pinned, latched, locked, 0, 0, group);
         }
         self.ahead = serialized(shadow) != serialized(state);

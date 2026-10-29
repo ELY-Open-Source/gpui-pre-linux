@@ -262,4 +262,73 @@ fn a_key_the_compositor_takes_moves_only_its_masks() {
     }
 }
 
+/// us,de, with Menu latching the next group.
+fn group_latch() -> State {
+    let names = layouts("us,de", "").get_keymap();
+    let text = names.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
+    let start = text.find("key <COMP>").expect("a Menu key");
+    let end = start + text[start..].find("};").expect("its end") + 2;
+    let menu = "key <COMP> { [ ISO_Next_Group ], actions[Group1] = [ LatchGroup(group=+1) ] };";
+    let text = format!("{}{menu}{}", &text[..start], &text[end..]);
+    let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+    let keymap = xkb::Keymap::new_from_string(&context, text, xkb::KEYMAP_FORMAT_TEXT_V1, 0)
+        .expect("the latching keymap compiles");
+    State::new(&keymap)
+}
+
+#[test]
+fn a_mask_no_seen_key_explains_drops_a_stale_latch() {
+    // Menu latches German; a taken key breaks it first.
+    let (mut held, mut state) = (HeldKeys::default(), group_latch());
+    let mut compositor = Compositor::new(group_latch());
+    let (play, y) = (172 + 8, 21 + 8);
+    for (keycode, pressed, seen) in [
+        (MENU, true, true),
+        (play, true, false),
+        (play, false, false),
+        (MENU, false, true),
+        (Q, true, true),
+        (Q, false, true),
+        (y, true, true),
+    ] {
+        if seen {
+            compositor.play(&mut held, &mut state, keycode, pressed);
+        } else {
+            compositor
+                .state
+                .update_key(Keycode::from(keycode), direction(pressed));
+            compositor.send(&mut held, &mut state);
+        }
+        assert_eq!(
+            compositor.differs(&state),
+            None,
+            "after {keycode} {pressed}"
+        );
+    }
+}
+
+#[test]
+fn a_mask_after_a_seen_key_corrects_the_shadow_s_latch() {
+    // Menu held, a taken key, Menu up, then q, y.
+    let (mut held, mut state) = (HeldKeys::default(), group_latch());
+    let mut compositor = Compositor::new(group_latch());
+    let (play, y): (u32, u32) = (172 + 8, 21 + 8);
+    compositor.play(&mut held, &mut state, MENU, true);
+    compositor
+        .state
+        .update_key(Keycode::from(play), direction(true));
+    compositor
+        .state
+        .update_key(Keycode::from(play), direction(false));
+    compositor.send(&mut held, &mut state);
+    for (keycode, pressed) in [(MENU, false), (Q, true), (Q, false), (y, true)] {
+        compositor.play(&mut held, &mut state, keycode, pressed);
+        assert_eq!(
+            compositor.differs(&state),
+            None,
+            "after {keycode} {pressed}"
+        );
+    }
+}
+
 mod fuzz;
