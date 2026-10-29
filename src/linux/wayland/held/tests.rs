@@ -389,8 +389,13 @@ impl Compositor {
 }
 
 /// Each keymap the fuzzing plays, with options that trip readings.
-const KEYMAPS: [(&str, &str); 8] = [
+const KEYMAPS: [(&str, &str); 13] = [
     ("us", ""),
+    ("us", "shift:breaks_caps"),
+    ("us", "caps:shiftlock"),
+    ("us", "shift:both_capslock_cancel"),
+    ("us", "ctrl:swapcaps"),
+    ("us,de", "grp:alt_shift_toggle"),
     ("us", "shift:both_capslock"),
     ("us,de", "grp:menu_toggle"),
     ("de", "lv3:ralt_switch_multikey"),
@@ -452,4 +457,69 @@ fn keys_held_into_the_window_are_matched_at_every_key() {
 #[test]
 fn a_compositor_sending_its_mask_is_matched_at_every_key() {
     fuzz(0, 40);
+}
+
+/// Keys down in the compositor alone, then focus and mask.
+fn focus(compositor: &mut Compositor, held: &mut HeldKeys, state: &mut State, keys: &[u32]) {
+    for keycode in keys {
+        compositor
+            .state
+            .update_key(Keycode::from(*keycode), direction(true));
+    }
+    held.unseen(keys.iter().map(|key| Keycode::from(*key)).collect());
+    compositor.sent = None;
+    compositor.send(held, state);
+}
+
+#[test]
+fn a_replay_keeps_the_level_its_press_found() {
+    // shift:breaks_caps: Shift with Lock held sets Shift and Lock.
+    let options = "shift:breaks_caps";
+    let (mut held, mut state) = (HeldKeys::default(), layouts("us", options));
+    let mut compositor = Compositor::new(layouts("us", options));
+    for (keycode, pressed) in [
+        (CAPS, true),
+        (SHIFT_R, true),
+        (SHIFT_L, true),
+        (SHIFT_R, false),
+        (CAPS, false),
+        (SHIFT_R, true),
+        (SHIFT_R, false),
+    ] {
+        compositor.play(&mut held, &mut state, keycode, pressed);
+        assert_eq!(compositor.differs(&state), None);
+    }
+}
+
+#[test]
+fn an_unseen_lock_key_keeps_what_it_holds() {
+    // caps:shiftlock: Caps held into the window; both Shifts tapped.
+    let (mut held, mut state) = (HeldKeys::default(), layouts("us", "caps:shiftlock"));
+    let mut compositor = Compositor::new(layouts("us", "caps:shiftlock"));
+    focus(&mut compositor, &mut held, &mut state, &[CAPS]);
+    for (keycode, pressed) in [
+        (SHIFT_R, true),
+        (SHIFT_R, false),
+        (SHIFT_L, true),
+        (SHIFT_L, false),
+    ] {
+        compositor.play(&mut held, &mut state, keycode, pressed);
+        assert_eq!(compositor.differs(&state), None);
+    }
+}
+
+#[test]
+fn an_unseen_lock_is_the_mask_s() {
+    // shift:both_capslock: both Shifts and Caps held into the window.
+    let options = "shift:both_capslock";
+    let (mut held, mut state) = (HeldKeys::default(), layouts("us", options));
+    let mut compositor = Compositor::new(layouts("us", options));
+    focus(
+        &mut compositor,
+        &mut held,
+        &mut state,
+        &[SHIFT_L, SHIFT_R, CAPS],
+    );
+    compositor.play(&mut held, &mut state, SHIFT_R, false);
+    assert_eq!(compositor.differs(&state), None);
 }
