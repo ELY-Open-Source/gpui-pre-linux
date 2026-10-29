@@ -210,7 +210,7 @@ fn a_focus_lost_resets_the_keys_state() {
 
 #[test]
 fn an_unseen_key_s_release_keeps_a_latch_s_history() {
-    // Right Shift and A held in; AltGr and a latch follow.
+    // Right Shift and A held in; AltGr, a latch follow.
     let options = "lv3:lalt_switch,lv3:caps_switch_latch";
     let (mut held, mut state) = (HeldKeys::default(), layouts("de", options));
     let mut compositor = Compositor::new(layouts("de", options));

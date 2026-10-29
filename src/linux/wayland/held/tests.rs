@@ -289,4 +289,16 @@ fn a_focus_lost_leaves_no_key_down() {
     assert_eq!(typed(&state, A), "a");
 }
 
+#[test]
+fn a_focus_lost_keeps_the_layout_shown() {
+    // German group, Shift held; focus goes.
+    let (mut held, mut state) = (HeldKeys::default(), layouts("us,de", ""));
+    sent(&mut held, &mut state, 0, 1);
+    key(&mut held, &mut state, SHIFT_L, true);
+    held.left(&mut state);
+    assert_eq!(state.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE), 1);
+    assert_eq!(state.serialize_mods(xkb::STATE_MODS_LOCKED), 16);
+    assert!(!modifiers_from_xkb(&state).shift);
+}
+
 mod compositor;

@@ -119,7 +119,11 @@ impl HeldKeys {
     pub fn left(&mut self, state: &mut State) {
         self.down.clear();
         self.pinned = None;
+        // Its group and locks stay, as the layout shown.
+        let locked = state.serialize_mods(xkb::STATE_MODS_LOCKED);
+        let group = state.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE);
         *state = State::new(&state.get_keymap());
+        state.update_mask(0, 0, locked, 0, 0, group);
     }
 
     fn unseen_down(&self) -> bool {
