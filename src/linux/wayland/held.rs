@@ -83,7 +83,7 @@ impl HeldKeys {
         }
         let [depressed, latched, locked, group] = serialized(shadow);
         if !self.down.iter().any(|down| down.under.is_none()) {
-            // The last unseen key went: what only the hold held, too.
+            // Last unseen key gone: so is what only it held.
             let seen = self.down.iter().fold(0, |seen, down| seen | down.own);
             let gone = self.pinned.take().unwrap_or(0) & !seen;
             shadow.update_mask(depressed & !gone, latched, locked, 0, 0, group);
@@ -111,7 +111,7 @@ impl HeldKeys {
             self.inferred[at] = (self.inferred[at] | added) & !dropped;
             next[at] = (mine[at] | added) & !dropped;
         }
-        next[3] = theirs[3];
+        // The group is the masks' alone, as gpui's was.
         // The shadow keeps what only a mask may drop.
         let [depressed, latched, locked, group] = next;
         shadow.update_mask(depressed, latched, locked, 0, 0, group);

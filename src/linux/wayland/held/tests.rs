@@ -232,7 +232,8 @@ fn a_key_keeps_the_group_it_was_pressed_in() {
     key(&mut held, &mut state, RALT, true);
     key(&mut held, &mut state, MENU, true);
     key(&mut held, &mut state, MENU, false);
-    assert_eq!(state.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE), 1);
+    // The group waits for the mask, as gpui's did.
+    assert_eq!(state.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE), 0);
     sent(&mut held, &mut state, 8, 1);
     key(&mut held, &mut state, LALT, false);
     assert!(modifiers_from_xkb(&state).alt);

@@ -331,4 +331,30 @@ fn a_mask_after_a_seen_key_corrects_the_shadow_s_latch() {
     }
 }
 
+#[test]
+fn a_latch_across_a_focus_change_moves_no_group_unasked() {
+    // Menu tapped, focus out and in, Menu, a, then y.
+    let (mut held, mut state) = (HeldKeys::default(), group_latch());
+    let mut compositor = Compositor::new(group_latch());
+    let y: u32 = 21 + 8;
+    compositor.play(&mut held, &mut state, MENU, true);
+    compositor.play(&mut held, &mut state, MENU, false);
+    held.left();
+    focus(&mut compositor, &mut held, &mut state, &[]);
+    for (keycode, pressed) in [
+        (MENU, true),
+        (MENU, false),
+        (A, true),
+        (A, false),
+        (y, true),
+    ] {
+        compositor.play(&mut held, &mut state, keycode, pressed);
+        assert_eq!(
+            compositor.differs(&state),
+            None,
+            "after {keycode} {pressed}"
+        );
+    }
+}
+
 mod fuzz;
