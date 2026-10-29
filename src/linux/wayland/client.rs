@@ -1383,7 +1383,6 @@ impl WaylandConnection {
         };
         if state.mouse_focused_window.is_some() || state.keyboard_focused_window.is_some() {
             let mime_types = offers(&item);
-            state.clipboard.set_primary(item);
             let Some(serial) = state.serial_tracker.selection_serial() else {
                 log::warn!(
                     "Skipping Wayland primary selection ownership request because no keyboard or pointer press serial has been received"
@@ -1396,6 +1395,11 @@ impl WaylandConnection {
             }
             data_source.offer(state.clipboard.self_mime());
             primary_selection.set_selection(Some(&data_source), serial.as_raw());
+            state.clipboard.set_primary(item);
+        } else {
+            log::warn!(
+                "Skipping Wayland primary selection ownership request because no window has focus"
+            );
         }
     }
 
@@ -1409,7 +1413,6 @@ impl WaylandConnection {
         };
         if state.mouse_focused_window.is_some() || state.keyboard_focused_window.is_some() {
             let mime_types = offers(&item);
-            state.clipboard.set(item);
             let Some(serial) = state.serial_tracker.selection_serial() else {
                 log::warn!(
                     "Skipping Wayland clipboard ownership request because no keyboard or pointer press serial has been received"
@@ -1423,6 +1426,9 @@ impl WaylandConnection {
             }
             data_source.offer(state.clipboard.self_mime());
             data_device.set_selection(Some(&data_source), serial.as_raw());
+            state.clipboard.set(item);
+        } else {
+            log::warn!("Skipping Wayland clipboard ownership request because no window has focus");
         }
     }
 

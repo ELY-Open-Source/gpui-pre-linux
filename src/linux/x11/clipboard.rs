@@ -210,7 +210,12 @@ struct Sending {
     target: Atom,
     bytes: Vec<u8>,
     at: usize,
+    /// When its requestor last took a segment.
+    moved: Instant,
 }
+
+/// A transfer whose requestor takes nothing this long is dropped.
+const STALLED: Duration = Duration::from_secs(30);
 
 /// Transfers under way, by the requestor's window and property.
 type Transfers = HashMap<(Window, Atom), Sending>;
@@ -705,13 +710,17 @@ impl Inner {
             )
             .map_err(into_unknown)?;
         sending.at = end;
+        sending.moved = Instant::now();
         if last {
             transfers.remove(&key);
-            let aux = ChangeWindowAttributesAux::new().event_mask(EventMask::NO_EVENT);
-            self.server
-                .conn
-                .change_window_attributes(event.window, &aux)
-                .map_err(into_unknown)?;
+            // The window's other transfers still need its events.
+            if !transfers.keys().any(|(window, _)| *window == event.window) {
+                let aux = ChangeWindowAttributesAux::new().event_mask(EventMask::NO_EVENT);
+                self.server
+                    .conn
+                    .change_window_attributes(event.window, &aux)
+                    .map_err(into_unknown)?;
+            }
         }
         self.server.conn.flush().map_err(into_unknown)
     }
@@ -773,8 +782,8 @@ impl Inner {
                 success = match data_list.iter().find(|d| d.format == event.target) {
                     Some(data) if data.bytes.len() > self.chunk() => {
                         // Too large for one request: its length, then segments.
-                        let aux =
-                            ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE);
+                        let mask = EventMask::PROPERTY_CHANGE | EventMask::STRUCTURE_NOTIFY;
+                        let aux = ChangeWindowAttributesAux::new().event_mask(mask);
                         self.server
                             .conn
                             .change_window_attributes(event.requestor, &aux)
@@ -797,6 +806,7 @@ impl Inner {
                             target: event.target,
                             bytes: data.bytes.clone(),
                             at: 0,
+                            moved: Instant::now(),
                         };
                         transfers.insert((event.requestor, event.property), sending);
                         true
@@ -938,7 +948,17 @@ fn serve_requests(context: Arc<Inner>) -> Result<(), Box<dyn std::error::Error>>
     let mut transfers = Transfers::new();
 
     loop {
-        match context.server.conn.wait_for_event().map_err(into_unknown)? {
+        let event = context.server.conn.wait_for_event().map_err(into_unknown)?;
+        let stalled = |sending: &Sending| sending.moved.elapsed() > STALLED;
+        if transfers.values().any(stalled) {
+            log::warn!("clipboard: a requestor stalled an INCR transfer; dropped");
+            transfers.retain(|_, sending| !stalled(sending));
+        }
+        match event {
+            // A requestor gone takes its transfers along.
+            Event::DestroyNotify(event) if event.window != context.server.win_id => {
+                transfers.retain(|(window, _), _| *window != event.window);
+            }
             Event::DestroyNotify(_) => {
                 // This window is being destroyed.
                 log::trace!("Clipboard server window is being destroyed x_x");

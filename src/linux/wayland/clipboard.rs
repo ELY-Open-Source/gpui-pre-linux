@@ -32,6 +32,9 @@ pub(crate) struct Clipboard {
     // Internal clipboard
     contents: Option<ClipboardItem>,
     primary_contents: Option<ClipboardItem>,
+    /// Whether this client set the selection, its offer still to come or here.
+    claimed: bool,
+    primary_claimed: bool,
 
     // External clipboard
     cached_read: Option<ClipboardItem>,
@@ -153,6 +156,13 @@ impl<T: ReceiveData> DataOffer<T> {
     }
 }
 
+/// Whether `offer` is this client's own.
+fn self_offered<T: ReceiveData>(offer: &Option<DataOffer<T>>, self_mime: &str) -> bool {
+    offer
+        .as_ref()
+        .is_some_and(|offer| offer.has_mime_type(self_mime))
+}
+
 /// The types `item` offers other programs.
 pub(crate) fn offers(item: &ClipboardItem) -> Vec<String> {
     let mut mimes: Vec<String> = Vec::new();
@@ -196,6 +206,8 @@ impl Clipboard {
 
             contents: None,
             primary_contents: None,
+            claimed: false,
+            primary_claimed: false,
 
             cached_read: None,
             current_offer: None,
@@ -204,21 +216,30 @@ impl Clipboard {
         }
     }
 
+    /// Holds `item` as the selection this client just set.
     pub fn set(&mut self, item: ClipboardItem) {
         self.contents = Some(item);
+        self.claimed = true;
     }
 
+    /// Holds `item` as the primary selection this client just set.
     pub fn set_primary(&mut self, item: ClipboardItem) {
         self.primary_contents = Some(item);
+        self.primary_claimed = true;
     }
 
     pub fn set_offer(&mut self, data_offer: Option<DataOffer<WlDataOffer>>) {
         self.cached_read = None;
+        // Another client's offer, or none, ends this client's claim.
+        let own = self_offered(&data_offer, &self.self_mime);
+        self.claimed &= own;
         self.current_offer = data_offer;
     }
 
     pub fn set_primary_offer(&mut self, data_offer: Option<DataOffer<ZwpPrimarySelectionOfferV1>>) {
         self.cached_primary_read = None;
+        let own = self_offered(&data_offer, &self.self_mime);
+        self.primary_claimed &= own;
         self.current_primary_offer = data_offer;
     }
 
@@ -249,6 +270,10 @@ impl Clipboard {
     }
 
     pub fn read(&mut self) -> Option<ClipboardItem> {
+        // The compositor sends this client's own offer later.
+        if self.claimed {
+            return self.contents.clone();
+        }
         let offer = self.current_offer.as_ref()?;
         if let Some(cached) = self.cached_read.clone() {
             return Some(cached);
@@ -265,6 +290,9 @@ impl Clipboard {
     }
 
     pub fn read_primary(&mut self) -> Option<ClipboardItem> {
+        if self.primary_claimed {
+            return self.primary_contents.clone();
+        }
         let offer = self.current_primary_offer.as_ref()?;
         if let Some(cached) = self.cached_primary_read.clone() {
             return Some(cached);
