@@ -2008,10 +2008,24 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
 
                 this.handle_keyboard_layout_change();
             }
-            wl_keyboard::Event::Enter { surface, .. } => {
+            wl_keyboard::Event::Enter { surface, keys, .. } => {
                 state.keyboard_focused_window = get_window(&mut state, &surface.id());
                 state.enter_token = Some(());
-                state.held.clear();
+                let held = match &state.keymap_state {
+                    Some(keymap_state) => keys
+                        .chunks_exact(4)
+                        .map(|key| {
+                            let key = u32::from_ne_bytes(key.try_into().expect("four bytes"));
+                            let keycode = Keycode::from(key + MIN_KEYCODE);
+                            (
+                                keycode,
+                                held::bit(keymap_state, keymap_state.key_get_one_sym(keycode)),
+                            )
+                        })
+                        .collect(),
+                    None => Vec::new(),
+                };
+                state.held.entered(held);
 
                 if let Some(window) = state.keyboard_focused_window.clone() {
                     drop(state);

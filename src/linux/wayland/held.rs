@@ -18,6 +18,7 @@ impl HeldMods {
     pub fn sent(&mut self, depressed: u32, latched: u32, locked: u32, group: u32) {
         (self.depressed, self.latched, self.locked, self.group) =
             (depressed, latched, locked, group);
+        self.held.retain(|(_, bit)| depressed & bit != 0);
         self.touched = 0;
     }
 
@@ -30,9 +31,15 @@ impl HeldMods {
         self.touched |= bit;
     }
 
-    /// Forgets everything, as a new keymap or focus starts afresh.
+    /// Forgets everything, as a new keymap or a focus lost starts afresh.
     pub fn clear(&mut self) {
         *self = Self::default();
+    }
+
+    /// Focus gained with these modifier keys already down.
+    pub fn entered(&mut self, held: Vec<(Keycode, u32)>) {
+        self.clear();
+        self.held = held.into_iter().filter(|(_, bit)| *bit != 0).collect();
     }
 
     /// Depressed modifiers: the mask, with bits keys touched since.
@@ -75,6 +82,7 @@ mod tests {
     use crate::linux::platform::modifiers_from_xkb;
 
     const SHIFT_L: u32 = 42 + 8;
+    const SHIFT_R: u32 = 54 + 8;
     const CONTROL_L: u32 = 29 + 8;
     const A: u32 = 30 + 8;
     const C: u32 = 46 + 8;
@@ -92,6 +100,18 @@ mod tests {
         let bit = bit(state, state.key_get_one_sym(keycode));
         assert_ne!(bit, 0, "keycode {keycode:?} holds a modifier");
         held.key(keycode, bit, pressed);
+        held.apply(state);
+    }
+
+    fn entered(held: &mut HeldMods, state: &mut State, keycodes: &[u32]) {
+        let keys = keycodes
+            .iter()
+            .map(|keycode| {
+                let keycode = Keycode::from(*keycode);
+                (keycode, bit(state, state.key_get_one_sym(keycode)))
+            })
+            .collect();
+        held.entered(keys);
         held.apply(state);
     }
 
@@ -154,7 +174,7 @@ mod tests {
         let (mut held, mut state) = (HeldMods::default(), us());
         sent(&mut held, &mut state, 0);
         key(&mut held, &mut state, SHIFT_L, true);
-        key(&mut held, &mut state, 54 + 8, true);
+        key(&mut held, &mut state, SHIFT_R, true);
         key(&mut held, &mut state, SHIFT_L, false);
         assert!(modifiers_from_xkb(&state).shift);
     }
@@ -170,5 +190,26 @@ mod tests {
         assert!(!modifiers_from_xkb(&state).shift);
         assert_eq!(bit(&state, Keysym::a), 0);
         assert_eq!(bit(&state, Keysym::Caps_Lock), 0);
+    }
+
+    #[test]
+    fn a_mask_drops_the_keys_it_leaves_out() {
+        // Left Shift's release swallowed, a mask without Shift, then Right Shift.
+        let (mut held, mut state) = (HeldMods::default(), us());
+        key(&mut held, &mut state, SHIFT_L, true);
+        sent(&mut held, &mut state, 0);
+        key(&mut held, &mut state, SHIFT_R, true);
+        key(&mut held, &mut state, SHIFT_R, false);
+        assert_eq!(state.key_get_utf8(Keycode::from(A)), "a");
+    }
+
+    #[test]
+    fn keys_held_on_entering_stay_held() {
+        // Both Shifts held into the window; the mask holds as one goes up.
+        let (mut held, mut state) = (HeldMods::default(), us());
+        entered(&mut held, &mut state, &[SHIFT_L, SHIFT_R]);
+        sent(&mut held, &mut state, 1);
+        key(&mut held, &mut state, SHIFT_L, false);
+        assert_eq!(state.key_get_utf8(Keycode::from(A)), "A");
     }
 }
