@@ -2002,6 +2002,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                     .expect("Failed to create keymap")
                 };
                 state.keymap_state = Some(xkb::State::new(&keymap));
+                state.held.rekeyed();
                 state.compose_state = get_xkb_compose_state(&xkb_context);
                 drop(state);
 
