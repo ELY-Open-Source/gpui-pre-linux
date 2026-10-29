@@ -2,56 +2,55 @@
 
 use xkbcommon::xkb::{self, Keycode, State};
 
-/// The keys down, which xkb's own rules turn into modifiers.
+/// The keys down, each with the modifiers its press added.
 #[derive(Default)]
 pub(super) struct HeldKeys {
-    down: Vec<Keycode>,
+    down: Vec<(Keycode, u32)>,
 }
 
 impl HeldKeys {
-    /// The compositor's mask: the held keys pressed again under it.
+    /// The compositor's mask, set over the keys' own state.
     pub fn sent(&mut self, state: &mut State, mask: [u32; 4]) {
         let [depressed, latched, locked, group] = mask;
-        *state = State::new(&state.get_keymap());
-        state.update_mask(0, 0, locked, 0, 0, group);
-        let mut kept = Vec::new();
-        for keycode in self.down.drain(..) {
-            let before = state.serialize_mods(xkb::STATE_MODS_DEPRESSED);
-            state.update_key(keycode, xkb::KeyDirection::Down);
-            let added = state.serialize_mods(xkb::STATE_MODS_DEPRESSED) & !before;
-            if added & !depressed == 0 {
-                kept.push(keycode);
-            } else {
-                // The mask says it went up.
-                state.update_key(keycode, xkb::KeyDirection::Up);
+        // A key's modifiers the mask leaves out: it went up.
+        self.down.retain(|(keycode, added)| {
+            let up = added & !depressed != 0;
+            if up {
+                state.update_key(*keycode, xkb::KeyDirection::Up);
             }
-        }
-        self.down = kept;
-        // The mask wins; each key keeps what its release clears.
+            !up
+        });
         state.update_mask(depressed, latched, locked, 0, 0, group);
     }
 
     /// Moves the state through a key, as xkb does.
     pub fn key(&mut self, state: &mut State, keycode: Keycode, pressed: bool) {
-        let held = self.down.contains(&keycode);
-        if pressed && held {
-            // Its release never came.
+        if let Some(at) = self.down.iter().position(|(down, _)| *down == keycode) {
+            self.down.remove(at);
+            if pressed {
+                // Its release never came.
+                state.update_key(keycode, xkb::KeyDirection::Up);
+            }
+        }
+        if !pressed {
             state.update_key(keycode, xkb::KeyDirection::Up);
+            return;
         }
-        self.down.retain(|down| *down != keycode);
-        if pressed {
-            self.down.push(keycode);
-        }
-        let direction = match pressed {
-            true => xkb::KeyDirection::Down,
-            false => xkb::KeyDirection::Up,
-        };
-        state.update_key(keycode, direction);
+        let before = state.serialize_mods(xkb::STATE_MODS_DEPRESSED);
+        state.update_key(keycode, xkb::KeyDirection::Down);
+        let added = state.serialize_mods(xkb::STATE_MODS_DEPRESSED) & !before;
+        self.down.push((keycode, added));
     }
 
-    /// Focus gained with these keys down; the mask follows.
-    pub fn entered(&mut self, down: Vec<Keycode>) {
-        self.down = down;
+    /// Keys pressed unseen, as before focus: the mask's alone.
+    pub fn unseen(&mut self, down: Vec<Keycode>) {
+        self.down = down.into_iter().map(|keycode| (keycode, 0)).collect();
+    }
+
+    /// The keys down, now pressed unseen by a new state.
+    pub fn rekeyed(&mut self) {
+        let down = self.down.iter().map(|(keycode, _)| *keycode).collect();
+        self.unseen(down);
     }
 
     /// Focus lost: no key is down here.
@@ -72,6 +71,8 @@ mod tests {
     const LWIN: u32 = 125 + 8;
     const RWIN: u32 = 126 + 8;
     const RALT: u32 = 100 + 8;
+    const LALT: u32 = 56 + 8;
+    const MENU: u32 = 127 + 8;
     const A: u32 = 30 + 8;
     const C: u32 = 46 + 8;
     const Q: u32 = 16 + 8;
@@ -186,7 +187,7 @@ mod tests {
     fn keys_held_on_entering_stay_held() {
         // Both Shifts held on entering; one goes up, mask unchanged.
         let (mut held, mut state) = (HeldKeys::default(), us());
-        held.entered(vec![Keycode::from(SHIFT_L), Keycode::from(SHIFT_R)]);
+        held.unseen(vec![Keycode::from(SHIFT_L), Keycode::from(SHIFT_R)]);
         sent(&mut held, &mut state, 1, 0);
         key(&mut held, &mut state, SHIFT_L, false);
         assert_eq!(typed(&state, A), "A");
@@ -199,6 +200,7 @@ mod tests {
         key(&mut held, &mut state, SHIFT_L, true);
         key(&mut held, &mut state, SHIFT_R, true);
         state = us();
+        held.rekeyed();
         sent(&mut held, &mut state, 1, 0);
         key(&mut held, &mut state, SHIFT_L, false);
         assert_eq!(typed(&state, A), "A");
@@ -272,12 +274,41 @@ mod tests {
     }
 
     #[test]
-    fn keys_held_in_a_group_are_pressed_again_in_it() {
+    fn keys_held_on_entering_are_the_mask_s() {
         // German group: Left Win and Right Alt are AltGr.
         let (mut held, mut state) = (HeldKeys::default(), layouts("us,de", "lv3:lwin_switch"));
-        held.entered(vec![Keycode::from(LWIN), Keycode::from(RALT)]);
+        held.unseen(vec![Keycode::from(LWIN), Keycode::from(RALT)]);
         sent(&mut held, &mut state, 0x80, 1);
         key(&mut held, &mut state, LWIN, false);
         assert_eq!(typed(&state, Q), "@");
+    }
+
+    #[test]
+    fn a_key_keeps_the_group_it_was_pressed_in() {
+        // Both Alts held; Menu toggles to German; Left Alt up.
+        let (mut held, mut state) = (HeldKeys::default(), layouts("us,de", "grp:menu_toggle"));
+        sent(&mut held, &mut state, 0, 0);
+        key(&mut held, &mut state, LALT, true);
+        key(&mut held, &mut state, RALT, true);
+        key(&mut held, &mut state, MENU, true);
+        key(&mut held, &mut state, MENU, false);
+        assert_eq!(state.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE), 1);
+        sent(&mut held, &mut state, 8, 1);
+        key(&mut held, &mut state, LALT, false);
+        assert!(modifiers_from_xkb(&state).alt);
+    }
+
+    #[test]
+    fn a_latch_is_read_before_the_key_that_takes_it() {
+        // AltGr held, Caps pressed: level three latches for one key.
+        let (mut held, mut state) = (HeldKeys::default(), layouts("de", "lv3:caps_switch_latch"));
+        sent(&mut held, &mut state, 0, 0);
+        key(&mut held, &mut state, RALT, true);
+        key(&mut held, &mut state, CAPS, true);
+        key(&mut held, &mut state, CAPS, false);
+        key(&mut held, &mut state, RALT, false);
+        assert_eq!(typed(&state, Q), "@");
+        key(&mut held, &mut state, Q, true);
+        assert_eq!(typed(&state, Q), "q");
     }
 }
