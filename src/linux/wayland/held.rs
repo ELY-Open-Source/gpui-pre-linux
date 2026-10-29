@@ -72,7 +72,7 @@ impl HeldMods {
     }
 }
 
-/// A key's modifiers in this group, as the keymap sets them.
+/// A key's modifiers in this group, from the keymap.
 pub(super) fn bits(state: &State, keycode: Keycode) -> u32 {
     // At this level the key may type, as Multi_key does.
     if !state.key_get_one_sym(keycode).is_modifier_key() {
@@ -283,7 +283,7 @@ mod tests {
 
     #[test]
     fn a_key_holds_what_its_group_maps_it_to() {
-        // In the German group Right Alt is AltGr, like Left Win.
+        // German group: Right Alt is AltGr, like Left Win.
         let (mut held, mut state) = (
             HeldMods::default(),
             State::new(&layouts("us,de", "lv3:lwin_switch")),
