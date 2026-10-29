@@ -2093,24 +2093,9 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                 };
 
                 let keycode = Keycode::from(key + MIN_KEYCODE);
-                // No mask came after the last key: the shadow's holds.
-                let state_ref = &mut *state;
-                let keymap_state = state_ref.keymap_state.as_mut().unwrap();
-                let layout = keymap_state.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE);
-                if state_ref.held.settle(keymap_state) {
-                    let relaid =
-                        keymap_state.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE) != layout;
-                    let modifiers = modifiers_from_xkb(keymap_state);
-                    let capslock = capslock_from_xkb(keymap_state);
-                    log::debug!("no mask after the last key: {modifiers:?}");
-                    state.modifiers = modifiers;
-                    state.capslock = capslock;
-                    let input = PlatformInput::ModifiersChanged(ModifiersChangedEvent {
-                        modifiers,
-                        capslock,
-                    });
+                if let Some((window, input, relaid)) = settle_keys(&mut state) {
                     drop(state);
-                    focused_window.handle_input(input);
+                    window.handle_input(input);
                     if relaid {
                         this.handle_keyboard_layout_change();
                     }
@@ -2334,6 +2319,26 @@ fn linux_button_to_gpui(button: u32) -> Option<MouseButton> {
     })
 }
 
+/// No mask came after the last key: the shadow's hold.
+fn settle_keys(
+    state: &mut WaylandClientState,
+) -> Option<(WaylandWindowStatePtr, PlatformInput, bool)> {
+    let keymap_state = state.keymap_state.as_mut()?;
+    let layout = keymap_state.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE);
+    if !state.held.settle(keymap_state) {
+        return None;
+    }
+    let relaid = keymap_state.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE) != layout;
+    state.modifiers = modifiers_from_xkb(keymap_state);
+    state.capslock = capslock_from_xkb(keymap_state);
+    log::debug!("no mask after the last key: {:?}", state.modifiers);
+    let input = PlatformInput::ModifiersChanged(ModifiersChangedEvent {
+        modifiers: state.modifiers,
+        capslock: state.capslock,
+    });
+    Some((state.keyboard_focused_window.clone()?, input, relaid))
+}
+
 impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
     fn event(
         this: &mut Self,
@@ -2345,6 +2350,15 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
     ) {
         let client = this.get_client();
         let mut state = client.borrow_mut();
+        // A key no mask answered counts before the pointer.
+        if let Some((window, input, relaid)) = settle_keys(&mut state) {
+            drop(state);
+            window.handle_input(input);
+            if relaid {
+                this.handle_keyboard_layout_change();
+            }
+            state = client.borrow_mut();
+        }
 
         match event {
             wl_pointer::Event::Enter {

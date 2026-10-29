@@ -304,4 +304,18 @@ fn a_focus_lost_keeps_the_layout_shown() {
     assert!(!modifiers_from_xkb(shadow).shift);
 }
 
+#[test]
+fn a_release_no_mask_follows_settles_for_any_reader() {
+    // Shift, a, Shift up; a click, not a key, reads next.
+    let (mut held, mut state) = (HeldKeys::default(), us());
+    sent(&mut held, &mut state, 0, 0);
+    for (keycode, pressed) in [(SHIFT_L, true), (A, true), (A, false)] {
+        key(&mut held, &mut state, keycode, pressed);
+    }
+    assert!(modifiers_from_xkb(&state).shift);
+    held.key(&state, Keycode::from(SHIFT_L), false);
+    assert!(held.settle(&mut state));
+    assert!(!modifiers_from_xkb(&state).shift);
+}
+
 mod compositor;
