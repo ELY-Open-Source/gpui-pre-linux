@@ -527,7 +527,7 @@ fn an_unseen_lock_is_the_mask_s() {
 
 #[test]
 fn a_plain_key_held_unseen_pins_no_later_modifier() {
-    // A held into the window; AltGr keys and a latch follow.
+    // A held into the window; AltGr and a latch follow.
     let options = "lv3:lalt_switch,lv3:caps_switch_latch";
     let (mut held, mut state) = (HeldKeys::default(), layouts("de", options));
     let mut compositor = Compositor::new(layouts("de", options));
