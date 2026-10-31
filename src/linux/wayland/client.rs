@@ -904,6 +904,17 @@ fn wl_seat_version(version: u32) -> anyhow::Result<u32> {
     Ok(version.clamp(WL_SEAT_MIN_VERSION, WL_SEAT_MAX_VERSION))
 }
 
+// The input model has one seat; the first stays through later advertisements.
+fn keep_seat(seat: &mut Option<wl_seat::WlSeat>, next: wl_seat::WlSeat) -> bool {
+    if seat.is_some() {
+        next.release();
+        false
+    } else {
+        *seat = Some(next);
+        true
+    }
+}
+
 fn wl_output_version(version: u32) -> anyhow::Result<u32> {
     const WL_OUTPUT_MIN_VERSION: u32 = 2;
     const WL_OUTPUT_MAX_VERSION: u32 = 4;
@@ -959,12 +970,13 @@ impl WaylandConnection {
             for global in list {
                 match &global.interface[..] {
                     "wl_seat" => {
-                        seat = Some(globals.registry().bind::<wl_seat::WlSeat, _, _>(
+                        let next = globals.registry().bind::<wl_seat::WlSeat, _, _>(
                             global.name,
                             wl_seat_version(global.version)?,
                             &qh,
                             (),
-                        ));
+                        );
+                        keep_seat(&mut seat, next);
                     }
                     "wl_output" => {
                         let output = globals.registry().bind::<wl_output::WlOutput, _, _>(
@@ -1559,18 +1571,8 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandClientStat
                 version,
             } => match &interface[..] {
                 "wl_seat" => {
-                    let Ok(version) = wl_seat_version(version) else {
-                        log::error!("ignoring wl_seat below the required version");
-                        return;
-                    };
-                    if let Some(wl_pointer) = state.wl_pointer.take() {
-                        wl_pointer.release();
-                    }
-                    if let Some(wl_keyboard) = state.wl_keyboard.take() {
-                        wl_keyboard.release();
-                    }
-                    state.wl_seat.release();
-                    state.wl_seat = registry.bind::<wl_seat::WlSeat, _, _>(name, version, qh, ());
+                    // The first seat owns the keyboard, pointer, IME and clipboard.
+                    log::debug!("wayland: later seat {name} does not replace the first");
                 }
                 "wl_output" => {
                     let Ok(version) = wl_output_version(version) else {
@@ -3166,6 +3168,108 @@ mod tests {
     use std::cell::Cell;
 
     use super::*;
+    use wayland_client::globals::GlobalListContents;
+    use wayland_server::protocol::wl_seat as server_seat;
+
+    struct SeatClient;
+    struct SeatServer;
+    struct Peer;
+
+    delegate_noop!(SeatClient: ignore wl_registry::WlRegistry);
+    delegate_noop!(SeatClient: ignore wl_seat::WlSeat);
+
+    impl wayland_server::GlobalDispatch<server_seat::WlSeat, ()> for SeatServer {
+        fn bind(
+            _: &mut Self,
+            _: &wayland_server::DisplayHandle,
+            _: &wayland_server::Client,
+            resource: wayland_server::New<server_seat::WlSeat>,
+            _: &(),
+            init: &mut wayland_server::DataInit<'_, Self>,
+        ) {
+            init.init(resource, ());
+        }
+    }
+
+    impl wayland_server::Dispatch<server_seat::WlSeat, ()> for SeatServer {
+        fn request(
+            _: &mut Self,
+            _: &wayland_server::Client,
+            _: &server_seat::WlSeat,
+            _: server_seat::Request,
+            _: &(),
+            _: &wayland_server::DisplayHandle,
+            _: &mut wayland_server::DataInit<'_, Self>,
+        ) {
+        }
+    }
+
+    impl wayland_server::backend::ClientData for Peer {}
+
+    impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for SeatClient {
+        fn event(
+            _: &mut Self,
+            _: &wl_registry::WlRegistry,
+            _: wl_registry::Event,
+            _: &GlobalListContents,
+            _: &Connection,
+            _: &QueueHandle<Self>,
+        ) {
+        }
+    }
+
+    fn globals_for_seats_test() -> (
+        wl_registry::WlRegistry,
+        wayland_client::EventQueue<SeatClient>,
+    ) {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        let (client, server) = UnixStream::pair().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let serving = stop.clone();
+        let server = std::thread::spawn(move || {
+            let mut display = wayland_server::Display::<SeatServer>::new().unwrap();
+            let dh = display.handle();
+            dh.create_global::<SeatServer, server_seat::WlSeat, _>(7, ());
+            dh.create_global::<SeatServer, server_seat::WlSeat, _>(7, ());
+            display
+                .handle()
+                .insert_client(server, Arc::new(Peer))
+                .unwrap();
+            while !serving.load(Ordering::Acquire) {
+                display.dispatch_clients(&mut SeatServer).unwrap();
+                display.flush_clients().unwrap();
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        });
+        let connection = Connection::from_socket(client).unwrap();
+        let (globals, mut queue) = registry_queue_init::<SeatClient>(&connection).unwrap();
+        let registry = globals.registry().clone();
+        queue.roundtrip(&mut SeatClient).unwrap();
+        stop.store(true, Ordering::Release);
+        server.join().unwrap();
+        (registry, queue)
+    }
+
+    #[test]
+    fn a_later_seat_never_takes_the_input() {
+        let (registry, event_queue) = globals_for_seats_test();
+        let queue = event_queue;
+        let qh = queue.handle();
+        let mut first = None;
+        assert!(keep_seat(
+            &mut first,
+            registry.bind::<wl_seat::WlSeat, _, _>(1, 7, &qh, ())
+        ));
+        assert!(!keep_seat(
+            &mut first,
+            registry.bind::<wl_seat::WlSeat, _, _>(2, 7, &qh, ())
+        ));
+        assert!(first.is_some());
+    }
 
     #[test]
     fn rejects_required_globals_below_supported_versions() {
