@@ -91,15 +91,25 @@ impl WindowRef {
         self.window.state.borrow().handle
     }
 
-    /// Whether the X server is presenting this window. Compositing window
-    /// managers rarely report `FULLY_OBSCURED`, so under them this is the
-    /// mapped state alone.
+    /// Whether the X server is presenting this window: mapped, not hidden by
+    /// the window manager, and not fully obscured.
     fn visibility(&self) -> WindowVisibility {
-        if self.is_mapped && !matches!(self.last_visibility, Visibility::FULLY_OBSCURED) {
-            WindowVisibility::Visible
-        } else {
-            WindowVisibility::Hidden
-        }
+        presented(
+            self.is_mapped,
+            self.window.is_hidden(),
+            self.last_visibility,
+        )
+    }
+}
+
+/// Whether a window is presented: mapped, not hidden by the window manager,
+/// and not fully obscured. A compositing window manager keeps a minimized
+/// window mapped and marks it `_NET_WM_STATE_HIDDEN` instead.
+fn presented(mapped: bool, hidden: bool, last: Visibility) -> WindowVisibility {
+    if mapped && !hidden && !matches!(last, Visibility::FULLY_OBSCURED) {
+        WindowVisibility::Visible
+    } else {
+        WindowVisibility::Hidden
     }
 }
 
@@ -1052,10 +1062,15 @@ impl X11Client {
             }
             Event::PropertyNotify(event) => {
                 let window = self.get_window(event.window)?;
+                let (atom, x_window) = (event.atom, event.window);
                 window
                     .property_notify(event)
                     .context("X11: Failed to handle property notify")
                     .log_err();
+                let wm_state = self.0.borrow().atoms._NET_WM_STATE;
+                if atom == wm_state {
+                    handle_visibility_changed(self.0.borrow_mut(), x_window);
+                }
             }
             Event::FocusIn(event) => {
                 let window = self.get_window(event.event)?;
@@ -2894,6 +2909,30 @@ fn xkb_state_for_key_event(xkb: &xkbc::State, event_state: xproto::KeyButMask) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hidden_window_is_not_presented() {
+        assert_eq!(
+            presented(true, false, Visibility::UNOBSCURED),
+            WindowVisibility::Visible
+        );
+        assert_eq!(
+            presented(true, false, Visibility::PARTIALLY_OBSCURED),
+            WindowVisibility::Visible
+        );
+        assert_eq!(
+            presented(true, true, Visibility::UNOBSCURED),
+            WindowVisibility::Hidden
+        );
+        assert_eq!(
+            presented(false, false, Visibility::UNOBSCURED),
+            WindowVisibility::Hidden
+        );
+        assert_eq!(
+            presented(true, false, Visibility::FULLY_OBSCURED),
+            WindowVisibility::Hidden
+        );
+    }
 
     fn test_keymap(layouts: &str) -> xkbc::Keymap {
         test_keymap_with_variant(layouts, "")
