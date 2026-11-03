@@ -1049,6 +1049,12 @@ impl X11Window {
 }
 
 impl X11WindowStatePtr {
+    /// Whether the window manager hides the window, as it does when minimized
+    /// or on another desktop.
+    pub(crate) fn is_hidden(&self) -> bool {
+        self.state.borrow().hidden
+    }
+
     pub fn should_close(&self) -> bool {
         let mut cb = self.callbacks.borrow_mut();
         if let Some(mut should_close) = cb.should_close.take() {
