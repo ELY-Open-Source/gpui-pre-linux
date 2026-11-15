@@ -939,8 +939,9 @@ impl WaylandWindowStatePtr {
         let require_presentation = state.presentation.requires_presentation();
         drop(state);
 
-        let mut callbacks = self.callbacks.borrow_mut();
-        let Some(request_frame_callback) = callbacks.request_frame.as_mut() else {
+        // A render may register callbacks, as on X11.
+        let Some(mut request_frame_callback) = self.callbacks.borrow_mut().request_frame.take()
+        else {
             self.frame_loop.set(FrameLoop::Parked);
             return;
         };
@@ -950,8 +951,11 @@ impl WaylandWindowStatePtr {
             signal_at,
             signal_source,
         });
+        self.callbacks
+            .borrow_mut()
+            .request_frame
+            .get_or_insert(request_frame_callback);
         self.update_ime_enabled();
-        drop(callbacks);
 
         self.complete_frame();
     }
@@ -1087,9 +1091,13 @@ impl WaylandWindowStatePtr {
                     state.window_controls = window_controls;
 
                     drop(state);
-                    let mut callbacks = self.callbacks.borrow_mut();
-                    if let Some(appearance_changed) = callbacks.appearance_changed.as_mut() {
+                    let callback = self.callbacks.borrow_mut().appearance_changed.take();
+                    if let Some(mut appearance_changed) = callback {
                         appearance_changed();
+                        self.callbacks
+                            .borrow_mut()
+                            .appearance_changed
+                            .get_or_insert(appearance_changed);
                     }
                 }
             }
@@ -1272,12 +1280,14 @@ impl WaylandWindowStatePtr {
                 false
             }
             xdg_toplevel::Event::Close => {
-                let mut cb = self.callbacks.borrow_mut();
-                if let Some(mut should_close) = cb.should_close.take() {
+                let callback = self.callbacks.borrow_mut().should_close.take();
+                if let Some(mut should_close) = callback {
                     let result = (should_close)();
-                    cb.should_close = Some(should_close);
+                    self.callbacks
+                        .borrow_mut()
+                        .should_close
+                        .get_or_insert(should_close);
                     if result {
-                        drop(cb);
                         self.close();
                     }
                     result
