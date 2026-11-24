@@ -92,10 +92,13 @@ impl WindowRef {
     }
 
     /// Whether the X server is presenting this window. Compositing window
-    /// managers rarely report `FULLY_OBSCURED`, so under them this is the
-    /// mapped state alone.
+    /// managers rarely report `FULLY_OBSCURED`, and GNOME's keeps a minimized
+    /// window mapped, so under them this is the mapped and hidden states.
     fn visibility(&self) -> WindowVisibility {
-        if self.is_mapped && !matches!(self.last_visibility, Visibility::FULLY_OBSCURED) {
+        if self.is_mapped
+            && !matches!(self.last_visibility, Visibility::FULLY_OBSCURED)
+            && !self.window.state.borrow().hidden
+        {
             WindowVisibility::Visible
         } else {
             WindowVisibility::Hidden
@@ -1056,6 +1059,10 @@ impl X11Client {
                     .property_notify(event)
                     .context("X11: Failed to handle property notify")
                     .log_err();
+                let state = self.0.borrow_mut();
+                if event.atom == state.atoms._NET_WM_STATE {
+                    handle_visibility_changed(state, event.window);
+                }
             }
             Event::FocusIn(event) => {
                 let window = self.get_window(event.event)?;

@@ -278,10 +278,11 @@ pub struct X11WindowState {
     background_appearance: WindowBackgroundAppearance,
     maximized_vertical: bool,
     maximized_horizontal: bool,
-    hidden: bool,
+    /// `_NET_WM_STATE_HIDDEN`: minimized, though a compositor may keep it mapped.
+    pub hidden: bool,
     active: bool,
     /// Owned by the client's `WindowRef`, which combines the mapped state with
-    /// `VisibilityNotify`; this is the last value it reported.
+    /// `VisibilityNotify` and `hidden`; this is the last value it reported.
     visibility: WindowVisibility,
     hovered: bool,
     force_render_after_recovery: bool,
